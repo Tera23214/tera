@@ -17,13 +17,13 @@ import itertools
 # ------------------------------------------------------------
 # Parameters
 # ------------------------------------------------------------
-N1 = 20000
-N2 = 5000
-M = 100
+N1 = 2000
+N2 = 500
+M = 50
 
 ALPHA_TILDE_START = 0
-ALPHA_TILDE_STOP = 3
-ALPHA_TILDE_STEP = 0.2
+ALPHA_TILDE_STOP = 2
+ALPHA_TILDE_STEP = 0.05
 
 LEARNING_RATE = 1e-2
 WEIGHT_DECAY = 0.0
@@ -39,15 +39,15 @@ USE_BIREGULAR_GRAPH = False  # Whether to generate uniform graph (bi-regular gra
 # Early Stop Configuration (Intelligent Convergence Detection)
 # ============================================================
 USE_EARLY_STOP = False  # Whether to enable Early Stop
-EPOCHS_PER_ALPHA = 20000
+EPOCHS_PER_ALPHA = 100000
 # [Mode 1] USE_EARLY_STOP = True (Recommended)
 #   Strategy: Detect both absolute threshold and relative change rate
 #   - Check loss every EARLY_STOP_CHECK_INTERVAL steps
 #   - Stop immediately when loss < TARGET_LOSS_THRESHOLD (absolute threshold)
 #   - Or stop when loss relative change < RELATIVE_CHANGE_THRESHOLD (convergence detection)
 #   - No more than MAX_STEPS_PER_ALPHA steps (safety upper limit)
-TARGET_LOSS_THRESHOLD = 1e-7           # Absolute loss threshold
-RELATIVE_CHANGE_THRESHOLD = 1e-5       # Relative change threshold (e.g., 0.001% = 1e-5)
+TARGET_LOSS_THRESHOLD = 1e-8           # Absolute loss threshold
+RELATIVE_CHANGE_THRESHOLD = 1e-7       # Relative change threshold (e.g., 0.001% = 1e-5)
 EARLY_STOP_CHECK_INTERVAL = 100        # Check interval (steps)
 EARLY_STOP_PATIENCE = 5                # How many consecutive checks of almost no change before stopping
 MAX_STEPS_PER_ALPHA = None             # Maximum step limit (None = use EPOCHS_PER_ALPHA)
@@ -86,7 +86,7 @@ if DEVICE.type == 'cuda':
 # ============================================================
 # Create Results Directory
 # ============================================================
-RESULT_DIR = Path(f"Matrix_result") / f"{N1}_{N2}_{M}"
+RESULT_DIR = Path(f"Result") / f"{N1}_{N2}_{M}"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 print(f"[Results directory] {RESULT_DIR}")
 
@@ -981,7 +981,7 @@ def plot_results(results_dict):
 # ------------------------------------------------------------
 if __name__ == "__main__":
     print("\n" + "=" * 100)
-    print("STARTING BATCHED GPU EXPERIMENT - PERFECT BI-REGULAR GRAPH")
+    print("Starting Sparse Matrix simulation")
     print("=" * 100)
 
     total_start = time.time()
