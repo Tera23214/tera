@@ -482,6 +482,8 @@ def train_batched_trials_agd(
         # Batched mask mode: Build different mask A for each trial
         # A shape: (S, N1, N2)
         A_b = torch.zeros((S, N1, N2), dtype=Wt.dtype, device=device)
+        # Type assertion: these are guaranteed not None due to use_batched_masks condition
+        assert i_idx_batched is not None and j_idx_batched is not None
         for s in range(S):
             if i_idx_batched[s].numel() > 0:
                 # MPS-compatible: avoid mixed scalar+tensor indexing
@@ -565,17 +567,18 @@ def train_batched_trials_agd(
                     break
 
                 # Strategy 2: Relative change detection (convergence judgment)
-                loss_history.append(current_loss)
-                if len(loss_history) >= EARLY_STOP_PATIENCE:
-                    # Calculate relative change over recent PATIENCE checks
-                    losses = list(loss_history)
-                    max_loss = max(losses)
-                    min_loss = min(losses)
-                    if max_loss > 1e-12:  # Avoid division by zero
-                        relative_change = (max_loss - min_loss) / max_loss
-                        if relative_change < RELATIVE_CHANGE_THRESHOLD:
-                            # Loss almost unchanged, converged
-                            break
+                if loss_history is not None:  # Type guard for Pylance
+                    loss_history.append(current_loss)
+                    if len(loss_history) >= EARLY_STOP_PATIENCE:
+                        # Calculate relative change over recent PATIENCE checks
+                        losses = list(loss_history)
+                        max_loss = max(losses)
+                        min_loss = min(losses)
+                        if max_loss > 1e-12:  # Avoid division by zero
+                            relative_change = (max_loss - min_loss) / max_loss
+                            if relative_change < RELATIVE_CHANGE_THRESHOLD:
+                                # Loss almost unchanged, converged
+                                break
 
     # Final statistics after completion (consistent with your original)
     if W.device.type == 'mps':
@@ -938,7 +941,7 @@ def plot_results(results_dict):
                           colWidths=[0.35, 0.65],
                           cellLoc='left',
                           loc='center',
-                          bbox=[0, 0, 1, 1])
+                          bbox=(0, 0, 1, 1))  # type: ignore  # Matplotlib accepts tuple for bbox
 
     table.auto_set_font_size(False)
     table.set_fontsize(10)
