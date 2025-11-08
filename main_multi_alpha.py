@@ -24,13 +24,13 @@ import itertools
 # ------------------------------------------------------------
 # Parameters
 # ------------------------------------------------------------
-N1 = 2000
-N2 = 500
+N1 = 200
+N2 = 200
 M = 50
 
 ALPHA_TILDE_START = 0
 ALPHA_TILDE_STOP = 2
-ALPHA_TILDE_STEP = 0.05
+ALPHA_TILDE_STEP = 0.01
 
 LEARNING_RATE = 1e-2
 WEIGHT_DECAY = 0.0
@@ -46,7 +46,7 @@ USE_BIREGULAR_GRAPH = False  # Whether to generate uniform graph (bi-regular gra
 # Early Stop Configuration (Intelligent Convergence Detection)
 # ============================================================
 USE_EARLY_STOP = False  # Whether to enable Early Stop
-EPOCHS_PER_ALPHA = 100000
+EPOCHS_PER_ALPHA = 1000000
 # [Mode 1] USE_EARLY_STOP = True (Recommended)
 #   Strategy: Detect both absolute threshold and relative change rate
 #   - Check loss every EARLY_STOP_CHECK_INTERVAL steps
@@ -632,9 +632,11 @@ def train_batched_trials_agd(
                                 # Loss almost unchanged, converged
                                 break
 
-    # Final statistics after completion (consistent with your original)
+    # Final statistics after completion - synchronize device operations
     if W.device.type == 'mps':
         torch.mps.synchronize()
+    elif W.device.type == 'cuda':
+        torch.cuda.synchronize()
 
     # ============================================================
     # Evaluation phase - Use FP32 precision to ensure accuracy
@@ -735,29 +737,41 @@ def train_all_alphas_parallel(
 
     A_all = torch.stack(all_masks, dim=0)  # (num_alphas, S, N1, N2)
 
-    # Initialize parameters
+    # Initialize parameters (use FP32 storage, same as batched version)
     print(f"[Step 2/4] Initializing parameters...")
     scale = 1.0 / (M ** 0.5)
     torch.manual_seed(seed_for_init)
-    W_all = torch.randn((num_alphas, S, N1, M), device=device, dtype=COMPUTE_DTYPE) * scale
-    X_all = torch.randn((num_alphas, S, M, N2), device=device, dtype=COMPUTE_DTYPE) * scale
+    W_all = torch.randn((num_alphas, S, N1, M), device=device, dtype=torch.float32) * scale
+    X_all = torch.randn((num_alphas, S, M, N2), device=device, dtype=torch.float32) * scale
 
     Y_teacher = Wt @ Xt
     Y_teacher_expanded = Y_teacher.unsqueeze(0).unsqueeze(0)
 
-    # Parallel training loop
+    # Parallel training loop with autocast support (same as batched version)
     print(f"[Step 3/4] Training {num_alphas} alphas in parallel...")
     for _ in tqdm(range(steps), desc="Training", leave=False, mininterval=0.5):
-        # Fused step for all alphas
-        Y_student = alpha_scale * torch.matmul(W_all, X_all)
-        Mres = (Y_teacher_expanded - Y_student) * A_all
-        grad_W = -2.0 * alpha_scale * torch.matmul(Mres, X_all.transpose(-2, -1))
-        W_all = W_all - lr * grad_W
+        # Use autocast for mixed precision training (consistent with batched version)
+        with torch.autocast(device_type=device.type, dtype=COMPUTE_DTYPE, enabled=USE_BF16):
+            # Fused step for all alphas
+            Y_student = alpha_scale * torch.matmul(W_all, X_all)
+            Mres = (Y_teacher_expanded - Y_student) * A_all
+            grad_W = -2.0 * alpha_scale * torch.matmul(Mres, X_all.transpose(-2, -1))
 
-        Y_student2 = alpha_scale * torch.matmul(W_all, X_all)
-        Mres2 = (Y_teacher_expanded - Y_student2) * A_all
-        grad_X = -2.0 * alpha_scale * torch.matmul(W_all.transpose(-2, -1), Mres2)
-        X_all = X_all - lr * grad_X
+        # Parameter update outside autocast (FP32)
+        W_all = W_all - lr * grad_W.float()
+
+        with torch.autocast(device_type=device.type, dtype=COMPUTE_DTYPE, enabled=USE_BF16):
+            Y_student2 = alpha_scale * torch.matmul(W_all, X_all)
+            Mres2 = (Y_teacher_expanded - Y_student2) * A_all
+            grad_X = -2.0 * alpha_scale * torch.matmul(W_all.transpose(-2, -1), Mres2)
+
+        X_all = X_all - lr * grad_X.float()
+
+    # Synchronize device before collecting results
+    if device.type == 'mps':
+        torch.mps.synchronize()
+    elif device.type == 'cuda':
+        torch.cuda.synchronize()
 
     # Collect results
     print(f"[Step 4/4] Collecting results...")
