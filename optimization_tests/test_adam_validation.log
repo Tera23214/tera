@@ -1,0 +1,26 @@
+
+================================================================================
+Step 1 验证: Epoch 扫描测试 (Adam + LR Scheduling)
+================================================================================
+目标: 找到 Step1 能达到 Baseline 效果的最小 epoch
+Baseline: 20000 epochs (固定)
+Step1 测试: [2000, 4000, 8000, 12000, 16000, 20000]
+对拍容差: 10.0%
+================================================================================
+
+================================================================================
+阶段 1: 运行 Baseline (固定 20000 epochs)
+================================================================================
+  修改 baseline/program/Main_baseline_for_comparison.py 中的 EPOCHS_PER_ALPHA = 20000
+
+================================================================================
+运行 baseline/program/Main_baseline_for_comparison.py (Baseline 20000 epochs)
+================================================================================
+❌ 训练失败，耗时 0.0s
+错误信息:
+Traceback (most recent call last):
+  File "/home/sucia/Sparse-Matrix/optimization_tests/baseline/program/Main_baseline_for_comparison.py", line 15, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'
+
+❌ Baseline 训练失败
