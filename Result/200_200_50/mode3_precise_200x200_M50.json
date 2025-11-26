@@ -1,0 +1,52 @@
+{
+  "config": {
+    "N1": 200,
+    "N2": 200,
+    "M": 50,
+    "samples_per_alpha": 3
+  },
+  "result": {
+    "alpha_c_final": 1.9003111111111113,
+    "alpha_c_uncertainty": 0.01924751258289314,
+    "alpha_c_extrapolated": 1.9769312600062785,
+    "extrapolation_quality": 0.7943065454955839,
+    "converged": false,
+    "convergence_round": 3,
+    "total_rounds": 3
+  },
+  "history": [
+    {
+      "steps": 100,
+      "alpha_c": 1.8,
+      "alpha_c_std": 0.014000318919189014,
+      "phase_zone": [
+        0.0,
+        2.0
+      ],
+      "max_gradient": 0.6947003029772436,
+      "Q_Y_at_alpha_c": 0.733625590801239
+    },
+    {
+      "steps": 200,
+      "alpha_c": 1.9066666666666667,
+      "alpha_c_std": 0.009803580024727735,
+      "phase_zone": [
+        0.0,
+        1.9933333333333334
+      ],
+      "max_gradient": 1.1447768026326068,
+      "Q_Y_at_alpha_c": 0.8006300330162048
+    },
+    {
+      "steps": 400,
+      "alpha_c": 1.9003111111111113,
+      "alpha_c_std": 0.01924751258289314,
+      "phase_zone": [
+        1.8139333333333336,
+        1.9866888888888892
+      ],
+      "max_gradient": 1.5514922524495107,
+      "Q_Y_at_alpha_c": 0.7815812428792318
+    }
+  ]
+}
