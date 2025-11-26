@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import json
+import time
 
 
 class PhaseTransitionAnalyzer:
@@ -874,8 +875,346 @@ class PhaseTransitionAnalyzer:
             }
         }
 
+    # ========================================
+    # 9. 功能3: 精密相变分析（热力学极限）
+    # ========================================
+
+    @staticmethod
+    def precise_phase_analysis(
+        train_callback,
+        initial_alpha_c: float,
+        N1: int,
+        N2: int,
+        M: int,
+        initial_window: float = 0.5,
+        initial_step: float = 0.05,
+        initial_epochs: int = 20000,
+        epoch_multiplier: float = 2.5,
+        max_rounds: int = 10,
+        alpha_c_tolerance: float = 0.001,
+        gradient_tolerance: float = 0.01,
+        convergence_patience: int = 3,
+        result_dir: Optional[Path] = None,
+        verbose: bool = True
+    ) -> Dict:
+        """
+        精密相变分析：通过逐步增加epochs和收窄范围，确定热力学极限下的相变点
+
+        核心思路：
+        - 只训练相变点附近小范围（α_c ± window）
+        - 每轮增加epochs → 提高精度
+        - 逐步收窄window → 聚焦相变点
+        - 检测收敛 → 3轮稳定即停止
+        - 外推到热力学极限（epochs → ∞）
+
+        参数:
+            train_callback: 训练函数 callback(alphas_array, epochs) -> metrics_dict
+            initial_alpha_c: 初始相变点估计（从粗扫或Mode 2获得）
+            N1, N2, M: 矩阵维度（用于结果目录命名）
+            initial_window: 初始搜索窗口 (α_c ± window)
+            initial_step: 初始alpha步长
+            initial_epochs: 初始训练epochs
+            epoch_multiplier: 每轮epochs倍增系数
+            max_rounds: 最大迭代轮数
+            alpha_c_tolerance: α_c收敛判断阈值
+            gradient_tolerance: 梯度相对变化阈值
+            convergence_patience: 连续稳定轮数（默认3轮）
+            result_dir: 结果保存目录
+            verbose: 是否打印详细信息
+
+        返回:
+            {
+                'alpha_c_thermodynamic': 热力学极限下的α_c（外推值）,
+                'alpha_c_final': 最后一轮的α_c,
+                'history': 各轮训练历史,
+                'converged': 是否收敛,
+                'total_rounds': 实际迭代轮数,
+                'confidence_interval': α_c的置信区间
+            }
+        """
+        if verbose:
+            print("=" * 80)
+            print("精密相变分析 - Precise Phase Transition Analysis")
+            print("=" * 80)
+            print(f"矩阵尺寸: {N1}×{N2}×{M}")
+            print(f"初始α_c估计: {initial_alpha_c:.3f}")
+            print(f"初始window: ±{initial_window}")
+            print(f"初始epochs: {initial_epochs}")
+            print(f"Epochs倍增: {epoch_multiplier}x per round")
+            print(f"收敛条件: |Δα_c| < {alpha_c_tolerance}, {convergence_patience}轮稳定")
+            print("=" * 80)
+
+        # 准备结果目录
+        if result_dir is None:
+            result_dir = Path(f"precise_phase_analysis/Result/{N1}_{N2}_{M}")
+        result_dir = Path(result_dir)
+        result_dir.mkdir(parents=True, exist_ok=True)
+
+        # 历史记录
+        history = []
+        alpha_c_list = []
+        gradient_list = []
+        epochs_list = []
+
+        # 迭代参数
+        current_alpha_c = initial_alpha_c
+        current_window = initial_window
+        current_step = initial_step
+        current_epochs = initial_epochs
+
+        converged = False
+        stable_count = 0  # 连续稳定计数
+
+        for round_num in range(1, max_rounds + 1):
+            if verbose:
+                print(f"\n{'='*80}")
+                print(f"Round {round_num}/{max_rounds}")
+                print(f"{'='*80}")
+                print(f"  α_c中心: {current_alpha_c:.4f}")
+                print(f"  搜索范围: [{current_alpha_c - current_window:.4f}, "
+                      f"{current_alpha_c + current_window:.4f}]")
+                print(f"  步长: Δα = {current_step:.4f}")
+                print(f"  Epochs: {current_epochs}")
+
+            # 生成alpha范围
+            alpha_start = max(0.0, current_alpha_c - current_window)
+            alpha_end = current_alpha_c + current_window
+            alphas = np.arange(alpha_start, alpha_end + current_step/2, current_step)
+
+            if verbose:
+                print(f"  Alpha点数: {len(alphas)}")
+                print(f"  开始训练...")
+
+            # 训练
+            round_start_time = time.time()
+            results = train_callback(alphas, current_epochs)
+            round_duration = time.time() - round_start_time
+
+            if verbose:
+                print(f"  ✓ 训练完成 ({round_duration/60:.1f}分钟)")
+
+            # 相变分析
+            analyzer = PhaseTransitionAnalyzer(alphas, results)
+            phase = analyzer.detect_phase_transition_enhanced()
+
+            detected_alpha_c = phase['alpha_c']
+            detected_gradient = phase['gradient']
+            consistency = phase['consistency']
+
+            if verbose:
+                print(f"\n  [分析结果]")
+                print(f"    检测到α_c: {detected_alpha_c:.4f}")
+                print(f"    梯度: {detected_gradient:.4f}")
+                print(f"    一致性: {consistency:.4f}")
+
+            # 保存本轮结果
+            round_result = {
+                'round': round_num,
+                'epochs': current_epochs,
+                'alpha_c': float(detected_alpha_c),
+                'gradient': float(detected_gradient),
+                'consistency': float(consistency),
+                'window': current_window,
+                'step': current_step,
+                'num_alphas': len(alphas),
+                'duration_minutes': round_duration / 60,
+                'alphas': alphas.tolist()
+            }
+            history.append(round_result)
+            alpha_c_list.append(detected_alpha_c)
+            gradient_list.append(detected_gradient)
+            epochs_list.append(current_epochs)
+
+            # 保存JSON
+            round_json_path = result_dir / f"round{round_num}_epoch{current_epochs}.json"
+            with open(round_json_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            if verbose:
+                print(f"  ✓ 结果已保存: {round_json_path.name}")
+
+            # 收敛检测
+            if round_num >= 2:
+                alpha_c_change = abs(alpha_c_list[-1] - alpha_c_list[-2])
+                gradient_change_rel = abs(gradient_list[-1] - gradient_list[-2]) / (abs(gradient_list[-2]) + 1e-8)
+
+                if verbose:
+                    print(f"\n  [收敛检测]")
+                    print(f"    |Δα_c| = {alpha_c_change:.5f} (阈值: {alpha_c_tolerance})")
+                    print(f"    |Δgradient|/|gradient| = {gradient_change_rel:.5f} (阈值: {gradient_tolerance})")
+
+                # 检查是否满足收敛条件
+                if alpha_c_change < alpha_c_tolerance and gradient_change_rel < gradient_tolerance:
+                    stable_count += 1
+                    if verbose:
+                        print(f"    ✓ 稳定 ({stable_count}/{convergence_patience})")
+
+                    if stable_count >= convergence_patience:
+                        converged = True
+                        if verbose:
+                            print(f"\n  ✓✓✓ 收敛！连续{convergence_patience}轮稳定")
+                        break
+                else:
+                    stable_count = 0
+                    if verbose:
+                        print(f"    ✗ 未稳定，重置计数器")
+
+            # 准备下一轮
+            if round_num < max_rounds:
+                # 更新α_c中心
+                current_alpha_c = detected_alpha_c
+
+                # 收窄window (每轮缩小到60%)
+                current_window = current_window * 0.6
+
+                # 细化步长 (每轮缩小到70%)
+                current_step = current_step * 0.7
+
+                # 增加epochs
+                current_epochs = int(current_epochs * epoch_multiplier)
+
+                if verbose:
+                    print(f"\n  [下一轮参数]")
+                    print(f"    新α_c中心: {current_alpha_c:.4f}")
+                    print(f"    新window: ±{current_window:.4f}")
+                    print(f"    新步长: Δα = {current_step:.5f}")
+                    print(f"    新epochs: {current_epochs}")
+
+        # 热力学极限外推
+        if verbose:
+            print(f"\n{'='*80}")
+            print("热力学极限外推 (Thermodynamic Limit Extrapolation)")
+            print(f"{'='*80}")
+
+        # 使用 1/epochs 作为x轴，α_c作为y轴进行线性拟合
+        # α_c(epochs) ≈ α_c(∞) + A/epochs
+        # 即 α_c vs 1/epochs 应该是线性的
+
+        if len(alpha_c_list) >= 3:
+            inv_epochs = np.array([1.0/e for e in epochs_list])
+            alpha_c_array = np.array(alpha_c_list)
+
+            # 线性拟合: α_c = intercept + slope * (1/epochs)
+            # intercept 就是 α_c(epochs→∞)
+            coeffs = np.polyfit(inv_epochs, alpha_c_array, deg=1)
+            slope, intercept = coeffs[0], coeffs[1]
+
+            alpha_c_thermodynamic = intercept
+
+            # 计算R²和置信区间
+            alpha_c_pred = np.polyval(coeffs, inv_epochs)
+            ss_res = np.sum((alpha_c_array - alpha_c_pred) ** 2)
+            ss_tot = np.sum((alpha_c_array - np.mean(alpha_c_array)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot)
+
+            # 简单置信区间估计（基于残差标准差）
+            residuals_std = np.sqrt(ss_res / (len(alpha_c_list) - 2))
+            confidence_interval = (
+                alpha_c_thermodynamic - 2 * residuals_std,
+                alpha_c_thermodynamic + 2 * residuals_std
+            )
+
+            if verbose:
+                print(f"  拟合方程: α_c(epochs) = {intercept:.5f} + {slope:.5f} / epochs")
+                print(f"  R² = {r_squared:.6f}")
+                print(f"\n  ✓ 热力学极限 (epochs→∞):")
+                print(f"    α_c(∞) = {alpha_c_thermodynamic:.5f}")
+                print(f"    95%置信区间: [{confidence_interval[0]:.5f}, {confidence_interval[1]:.5f}]")
+        else:
+            # 数据点太少，无法外推
+            alpha_c_thermodynamic = alpha_c_list[-1]
+            confidence_interval = None
+            r_squared = None
+            if verbose:
+                print(f"  数据点不足（{len(alpha_c_list)} < 3），无法外推")
+                print(f"  使用最后一轮结果: α_c = {alpha_c_thermodynamic:.5f}")
+
+        # 保存收敛历史
+        convergence_history = {
+            'converged': converged,
+            'total_rounds': len(history),
+            'alpha_c_thermodynamic': float(alpha_c_thermodynamic) if alpha_c_thermodynamic is not None else None,
+            'alpha_c_final': float(alpha_c_list[-1]),
+            'confidence_interval': [float(confidence_interval[0]), float(confidence_interval[1])] if confidence_interval else None,
+            'r_squared': float(r_squared) if r_squared is not None else None,
+            'history': history
+        }
+
+        history_path = result_dir / "convergence_history.json"
+        with open(history_path, 'w') as f:
+            json.dump(convergence_history, f, indent=2)
+
+        if verbose:
+            print(f"\n✓ 收敛历史已保存: {history_path}")
+
+        # 生成收敛曲线图
+        if len(alpha_c_list) >= 2:
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+            # 子图1: α_c vs Round
+            ax1 = axes[0, 0]
+            ax1.plot(range(1, len(alpha_c_list)+1), alpha_c_list, 'bo-', linewidth=2, markersize=8)
+            ax1.axhline(alpha_c_thermodynamic, color='r', linestyle='--', label=f'α_c(∞) = {alpha_c_thermodynamic:.5f}')
+            ax1.set_xlabel('Round', fontsize=12)
+            ax1.set_ylabel('α_c', fontsize=12)
+            ax1.set_title('Phase Transition Point Convergence', fontsize=14, fontweight='bold')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+
+            # 子图2: α_c vs 1/epochs (热力学极限外推)
+            ax2 = axes[0, 1]
+            if len(alpha_c_list) >= 3:
+                inv_epochs = np.array([1.0/e for e in epochs_list])
+                ax2.plot(inv_epochs, alpha_c_list, 'go', markersize=10, label='Training results')
+
+                # 拟合线
+                x_fit = np.linspace(0, max(inv_epochs), 100)
+                y_fit = slope * x_fit + intercept
+                ax2.plot(x_fit, y_fit, 'r--', linewidth=2, label=f'Fit: {intercept:.5f} + {slope:.5f}/epochs')
+                ax2.plot([0], [alpha_c_thermodynamic], 'r*', markersize=20, label=f'α_c(∞) = {alpha_c_thermodynamic:.5f}')
+
+                ax2.set_xlabel('1 / epochs', fontsize=12)
+                ax2.set_ylabel('α_c', fontsize=12)
+                ax2.set_title(f'Thermodynamic Limit Extrapolation (R²={r_squared:.4f})', fontsize=14, fontweight='bold')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+
+            # 子图3: Gradient vs Round
+            ax3 = axes[1, 0]
+            ax3.plot(range(1, len(gradient_list)+1), gradient_list, 'mo-', linewidth=2, markersize=8)
+            ax3.set_xlabel('Round', fontsize=12)
+            ax3.set_ylabel('Gradient (dQ_Y/dα)', fontsize=12)
+            ax3.set_title('Gradient Convergence', fontsize=14, fontweight='bold')
+            ax3.grid(True, alpha=0.3)
+
+            # 子图4: 收敛指标
+            ax4 = axes[1, 1]
+            if len(alpha_c_list) >= 2:
+                alpha_c_changes = [abs(alpha_c_list[i] - alpha_c_list[i-1]) for i in range(1, len(alpha_c_list))]
+                ax4.semilogy(range(2, len(alpha_c_list)+1), alpha_c_changes, 'co-', linewidth=2, markersize=8, label='|Δα_c|')
+                ax4.axhline(alpha_c_tolerance, color='r', linestyle='--', label=f'Threshold = {alpha_c_tolerance}')
+                ax4.set_xlabel('Round', fontsize=12)
+                ax4.set_ylabel('|Δα_c|', fontsize=12)
+                ax4.set_title('Convergence Criteria', fontsize=14, fontweight='bold')
+                ax4.legend()
+                ax4.grid(True, alpha=0.3, which='both')
+
+            plt.tight_layout()
+            plot_path = result_dir / "thermodynamic_limit_analysis.png"
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            if verbose:
+                print(f"✓ 分析图表已保存: {plot_path}")
+
+        if verbose:
+            print(f"\n{'='*80}")
+            print("✓ 精密相变分析完成")
+            print(f"{'='*80}")
+
+        return convergence_history
+
 
 if __name__ == "__main__":
     # 简单测试
-    print("PhaseTransitionAnalyzer 类已定义")
-    print("使用 test_phase_detection.py 进行完整测试")
+    print("PhaseTransitionAnalyzer V2 类已定义（含Mode 3: 精密相变分析）")
+    print("使用 run_precise_analysis.py 进行完整测试")

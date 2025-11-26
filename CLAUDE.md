@@ -28,14 +28,14 @@ Three main implementations are available:
    - Dramatically faster (reduces Python loop overhead by N_alpha times)
    - Uses SGD with fixed learning rate
 
-3. **Optimized Parallel Training** ([Main_multi_alpha_optimized.py](Main_multi_alpha_optimized.py)) - **RECOMMENDED FOR PRODUCTION**:
+3. **Optimized Parallel Training** (In `optimization_tests/step1_adam_scheduler/`):
    ```bash
-   python Main_multi_alpha_optimized.py
+   python optimization_tests/step1_adam_scheduler/program/Main_step1_adam_scheduler.py
    ```
-   - **10x faster convergence**: Adam optimizer + Cosine Annealing LR scheduler
-   - Same parallel alpha training as Main_multi_alpha.py
+   - **10x faster convergence**: Manual Adam optimizer + Cosine Annealing LR scheduler
+   - Same parallel alpha training architecture as Main_multi_alpha.py
    - Achieves baseline 20k epoch quality in just 2k epochs
-   - Suitable for production runs with large epoch budgets (e.g., 300k → 30k)
+   - Validated and ready for production (see VALIDATION_REPORT.md)
 
 ### Key Configuration Parameters
 
@@ -82,8 +82,8 @@ All parameters are configured via global variables at the top of each script:
    - **Random** ([sample_pairs_random_gpu](Main.py#L125-L162)): Pure GPU-based random sampling using `torch.randperm`. Faster and supports any N1≠N2.
 
 3. **Student Model Training**:
-   - **Sequential version** ([train_batched_trials_agd](Main.py#L519-L689)): Trains S trials for one alpha value
-   - **Parallel version** ([train_all_alphas_parallel](Main_multi_alpha.py#L698-L859)): Trains all alphas simultaneously
+   - **Sequential version** ([train_batched_trials_agd](Main.py#L500)): Trains S trials for one alpha value
+   - **Parallel version** ([train_all_alphas_parallel](Main_multi_alpha.py)): Trains all alphas simultaneously
 
 4. **Evaluation**:
    - Gram overlap metrics (Q_W, Q_X) - measures how well student recovers teacher subspaces
@@ -153,18 +153,24 @@ The plot combines:
 Sparse-Matrix/
 ├── Main.py                              # Sequential alpha training (baseline)
 ├── Main_multi_alpha.py                  # Parallel alpha training (SGD)
-├── Main_multi_alpha_optimized.py        # Parallel + optimized (Adam+LR, PRODUCTION)
+├── CLAUDE.md                            # Project documentation
 ├── Result/                              # Production results
 │   └── {N1}_{N2}_{M}/
 │       ├── *.json                       # Result data files
 │       └── *.png                        # Generated plots
 └── optimization_tests/                  # Testing & optimization experiments
+    ├── phase_transition_analyzer.py     # Phase transition detection (Mode 1-2)
+    ├── compare_with_phase_check.py      # Enhanced validation with phase check
+    ├── VALIDATION_REPORT.md             # Step1 validation report
+    ├── utils/
+    │   └── log_parser.py                # Training log parser (corrected)
     ├── baseline/                        # Baseline comparison programs
     ├── step1_adam_scheduler/            # Step 1: Adam + LR scheduler (10x speedup)
-    ├── step2_adaptive_sampling/         # Step 2: Adaptive alpha sampling (in progress)
-    ├── phase_transition_analyzer.py     # Phase transition detection tool
-    ├── compare_with_phase_check.py      # Enhanced validation with phase check
-    ├── test_*.py                        # Test scripts
+    ├── step2_adaptive_sampling/         # Step 2: Adaptive alpha sampling
+    ├── step3_precise_analysis/          # Step 3: Precise phase analysis (Mode 3)
+    │   ├── phase_transition_analyzer_v2.py
+    │   ├── run_precise_analysis.py
+    │   └── README.md
     └── Result/                          # Test results (separate from production)
         └── {N1}_{N2}_{M}/
 ```
@@ -190,7 +196,7 @@ Sparse-Matrix/
 The optimized version uses manual Adam implementation to preserve alternating gradient descent:
 
 ```python
-# Hyperparameters (Main_multi_alpha_optimized.py)
+# Hyperparameters (optimization_tests/step1_adam_scheduler/program/Main_step1_adam_scheduler.py)
 ADAM_BETA1 = 0.9
 ADAM_BETA2 = 0.999
 ADAM_EPS = 1e-8
@@ -267,11 +273,11 @@ Baseline (SGD) → Step1 (Adam+LR) → Step2 (Adaptive Sampling) → Production
 - **Validation**: Dual validation (point-by-point + phase transition accuracy)
 - **Status**: 🚧 In Progress
 
-**📋 Step3: Precise Phase Analysis** (Future)
+**✅ Step3: Precise Phase Analysis** (`optimization_tests/step3_precise_analysis/`)
 - **Goal**: Research-grade accurate phase transition point detection
 - **Implementation**: Multi-round training with increasing epochs, thermodynamic limit extrapolation
 - **Use Case**: Scientific analysis, precise α_c determination
-- **Status**: 📋 Planned
+- **Status**: ✅ Implemented (see `optimization_tests/step3_precise_analysis/README.md` for usage)
 
 ### PhaseTransitionAnalyzer Architecture
 
@@ -462,11 +468,12 @@ These decisions were made through extensive discussion and must NOT be changed w
 **Testing**: `optimization_tests/` directory
 **Never mix**: Test code must stay in `optimization_tests/` until fully validated
 
-**Reason**: Prevents premature deployment of buggy code (learned from Main_multi_alpha_optimized.py incident)
+**Reason**: Prevents premature deployment of buggy code - test thoroughly in `optimization_tests/` before promoting to root
 
 #### 6. Result Separation
 **Production results**: `Result/` directory
 **Test results**: `optimization_tests/Result/` directory
+**Precise analysis results**: `optimization_tests/Result/{N1}_{N2}_{M}/precise_analysis/` directory
 
 **Critical**: Never modify production `Result/` until all testing stages complete
 

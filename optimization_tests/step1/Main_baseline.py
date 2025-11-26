@@ -1,6 +1,13 @@
 # ============================================================
-# Teacher–Student Masked MF - GPU Batched Parallel Version
+# Teacher–Student Masked MF - Multi-Alpha Parallel Version
 # Perfect Bi-Regular Graph (no duplicate edges)
+#
+# Performance Optimizations:
+# 1. Kernel Fusion: Reduces GPU kernel launches by ~66%
+# 2. Parallel Alpha Training: Trains all alpha values simultaneously
+#    - Reduces Python loop overhead by N_alpha times
+#    - Dramatically improves CPU efficiency on small matrices
+# 3. torch.compile: Automatic kernel fusion (PyTorch 2.0+)
 # ============================================================
 
 from pathlib import Path
@@ -17,13 +24,13 @@ import itertools
 # ------------------------------------------------------------
 # Parameters
 # ------------------------------------------------------------
-N1 = 10000
-N2 = 10000
-M = 100
+N1 = 200
+N2 = 200
+M = 50
 
 ALPHA_TILDE_START = 0
-ALPHA_TILDE_STOP = 4
-ALPHA_TILDE_STEP = 0.1  # Coarse scan first
+ALPHA_TILDE_STOP = 2
+ALPHA_TILDE_STEP = 0.01
 
 LEARNING_RATE = 1e-2
 WEIGHT_DECAY = 0.0
@@ -39,7 +46,7 @@ USE_BIREGULAR_GRAPH = False  # Whether to generate uniform graph (bi-regular gra
 # Early Stop Configuration (Intelligent Convergence Detection)
 # ============================================================
 USE_EARLY_STOP = False  # Whether to enable Early Stop
-EPOCHS_PER_ALPHA = 5000  # Coarse scan: higher epochs for large matrices
+EPOCHS_PER_ALPHA = 3000000
 # [Mode 1] USE_EARLY_STOP = True (Recommended)
 #   Strategy: Detect both absolute threshold and relative change rate
 #   - Check loss every EARLY_STOP_CHECK_INTERVAL steps
@@ -56,7 +63,7 @@ MAX_STEPS_PER_ALPHA = None             # Maximum step limit (None = use EPOCHS_P
 #   - Fixed training of EPOCHS_PER_ALPHA steps, no loss checking
 #   - Output final loss for quality checking when last alpha training completes
 
-SAMPLES_PER_ALPHA = 1
+SAMPLES_PER_ALPHA = 5
 RESAMPLE_MASK_EACH_TRIAL = True
 
 SEED = 42
@@ -71,8 +78,8 @@ DEVICE = torch.device('mps' if torch.backends.mps.is_available() else
 #   - Speed boost: ~2x
 #   - Memory saving: 50%
 #   - Precision impact: Minimal (BF16 range same as FP32)
-USE_BF16 = False  # Disable BF16 to avoid torch.compile dtype issues
-COMPUTE_DTYPE = torch.float32
+USE_BF16 = (DEVICE.type == 'cuda')  # Enable BF16 only on CUDA
+COMPUTE_DTYPE = torch.bfloat16 if USE_BF16 else torch.float32
 
 # TF32 acceleration: Let CUDA automatically use TensorFloat32 to accelerate FP32 matrix multiplication
 #   - Speed boost: Matrix multiplication itself ~8x, overall program ~1.1-1.3x
@@ -86,7 +93,7 @@ if DEVICE.type == 'cuda':
 # ============================================================
 # Create Results Directory
 # ============================================================
-RESULT_DIR = Path(f"Result") / f"{N1}_{N2}_{M}"
+RESULT_DIR = Path(__file__).parent / "result" / f"{N1}_{N2}_{M}"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 print(f"[Results directory] {RESULT_DIR}")
 
@@ -95,7 +102,6 @@ print(f"[Compute dtype] {COMPUTE_DTYPE}")
 print(f"[Implementation] DENSE MATRIX (full N1×N2 computation)")
 print(f"[Graph generation] {'Bi-regular (Dinic)' if USE_BIREGULAR_GRAPH else 'Random (GPU fast)'}")
 print(f"[Samples per alpha] {SAMPLES_PER_ALPHA} (batched on GPU)")
-print(f"[Optimization] Kernel fusion enabled (reduces GPU kernel launches by ~66%)")
 
 
 # ------------------------------------------------------------
@@ -447,51 +453,48 @@ class MaskedMF_Batched(nn.Module):
 
 
 # ------------------------------------------------------------
-# Batched Training - Optimized Kernel Fusion
+# Kernel Fusion Optimization
 # ------------------------------------------------------------
 
 def fused_training_step(W, X, Y_teacher_b, A_b, alpha, lr):
     """
     Fused training step to reduce kernel launches.
 
-    This function combines multiple operations into fewer kernels:
-    - Computes both W and X gradients with fused operations
-    - Reduces kernel count from ~18 to ~6 per step
-    - Compatible with both MPS and CUDA
-
-    Args:
-        W: Student W parameters (S, N1, M)
-        X: Student X parameters (S, M, N2)
-        Y_teacher_b: Teacher output (1, N1, N2) or (S, N1, N2)
-        A_b: Observation mask (1, N1, N2) or (S, N1, N2)
-        alpha: Scaling factor (1/sqrt(M))
-        lr: Learning rate
-
-    Returns:
-        Updated W, X tensors
+    Reduces kernel count from ~18 to ~6 per step by fusing operations.
+    Compatible with both MPS and CUDA.
     """
     # W update - fused operations
     Y_student = alpha * torch.matmul(W, X)
-    # Fuse subtraction and multiplication
     Mres = (Y_teacher_b - Y_student) * A_b
-    grad_W = -2.0 * alpha * torch.matmul(Mres, X.transpose(1, 2))
+    grad_W = -2.0 * alpha * torch.matmul(Mres, X.transpose(-2, -1))
     W = W - lr * grad_W
 
     # X update - fused operations with updated W
     Y_student2 = alpha * torch.matmul(W, X)
     Mres2 = (Y_teacher_b - Y_student2) * A_b
-    grad_X = -2.0 * alpha * torch.matmul(W.transpose(1, 2), Mres2)
+    grad_X = -2.0 * alpha * torch.matmul(W.transpose(-2, -1), Mres2)
     X = X - lr * grad_X
 
     return W, X
 
 
-# Try to compile the training step for better performance
-# Disable torch.compile for large matrices (CUDA graph issues with 10000×10000)
-# Manual kernel fusion is already implemented and provides good performance
-fused_training_step_compiled = fused_training_step
-USE_COMPILED_STEP = False
-print("[Optimization] Using manual kernel fusion (torch.compile disabled for stability)")
+# Try to compile for better performance (PyTorch 2.0+)
+try:
+    pytorch_version = tuple(int(x) for x in torch.__version__.split('.')[:2])
+    if pytorch_version >= (2, 0):
+        fused_training_step_compiled = torch.compile(
+            fused_training_step,
+            mode='reduce-overhead',
+            fullgraph=True
+        )
+        USE_COMPILED_STEP = True
+        print("[Optimization] torch.compile enabled for kernel fusion")
+    else:
+        fused_training_step_compiled = fused_training_step
+        USE_COMPILED_STEP = False
+except Exception:
+    fused_training_step_compiled = fused_training_step
+    USE_COMPILED_STEP = False
 
 
 # ------------------------------------------------------------
@@ -557,14 +560,13 @@ def train_batched_trials_agd(
     X = torch.randn((S, M, N2), device=device, dtype=torch.float32) * scale
 
     # ============================================================
-    # Training loop - Optimized with Kernel Fusion
+    # Training loop - Use BF16 mixed precision acceleration + Early Stop
     # ============================================================
-    # Optimization strategy:
-    # 1. Use fused training step to reduce kernel launches from ~18 to ~6 per step
-    # 2. torch.compile automatically fuses operations when available (PyTorch 2.0+)
-    # 3. Unified precision handling: use COMPUTE_DTYPE throughout (BF16 on CUDA, FP32 on MPS)
-    # 4. Eliminates redundant type conversions (.float() calls)
-    # 5. Early Stop: Training strategy decided by USE_EARLY_STOP switch
+    # Strategy explanation:
+    # 1. Parameters W, X stored in FP32 (maintain precision)
+    # 2. Forward and gradient computation use BF16 (accelerate 2x, save 50% memory)
+    # 3. Parameter updates automatically convert back to FP32 (PyTorch autocast handles automatically)
+    # 4. Early Stop: Training strategy decided by USE_EARLY_STOP switch
     # ============================================================
 
     actual_steps = 0  # Actual training steps
@@ -575,14 +577,29 @@ def train_batched_trials_agd(
     loss_history = deque(maxlen=EARLY_STOP_PATIENCE) if USE_EARLY_STOP else None
     max_training_steps = MAX_STEPS_PER_ALPHA if MAX_STEPS_PER_ALPHA is not None else steps
 
-    # Convert to compute dtype for training (BF16 on CUDA, FP32 on MPS/CPU)
-    W = W.to(dtype=COMPUTE_DTYPE)
-    X = X.to(dtype=COMPUTE_DTYPE)
-
     for step in range(max_training_steps):
-        # Use optimized fused training step
-        # This reduces kernel launches and improves GPU utilization
-        W, X = fused_training_step_compiled(W, X, Y_teacher_b, A_b, alpha, lr)
+        # Use autocast to enable BF16 mixed precision
+        # Note: Only use BF16 when USE_BF16=True, otherwise use FP32
+        with torch.autocast(device_type=device.type, dtype=COMPUTE_DTYPE, enabled=USE_BF16):
+            # --- 1) Compute gradient for W using current (W, X), and update W ---
+            Y_student = alpha * torch.matmul(W, X)                  # (S, N1, N2) BF16 computation
+            R = Y_teacher_b - Y_student                             # (S, N1, N2)
+            Mres = R * A_b                                          # (S, N1, N2)
+            # grad_W = -2 * alpha * (M @ X^T)
+            grad_W = -2.0 * alpha * torch.matmul(Mres, X.transpose(1, 2))   # (S, N1, M)
+
+        # Parameter update outside autocast, automatically use FP32 precision
+        W = W - lr * grad_W.float()  # Ensure gradient converts back to FP32
+
+        with torch.autocast(device_type=device.type, dtype=COMPUTE_DTYPE, enabled=USE_BF16):
+            # --- 2) Recompute with updated W, gradient for X, and update X ---
+            Y_student2 = alpha * torch.matmul(W, X)                 # (S, N1, N2)
+            R2 = Y_teacher_b - Y_student2
+            Mres2 = R2 * A_b
+            # grad_X = -2 * alpha * (W^T @ M)
+            grad_X = -2.0 * alpha * torch.matmul(W.transpose(1, 2), Mres2)   # (S, M, N2)
+
+        X = X - lr * grad_X.float()  # Ensure gradient converts back to FP32
         actual_steps = step + 1
 
         # ============================================================
@@ -615,11 +632,16 @@ def train_batched_trials_agd(
                                 # Loss almost unchanged, converged
                                 break
 
+    # Final statistics after completion - synchronize device operations
+    if W.device.type == 'mps':
+        torch.mps.synchronize()
+    elif W.device.type == 'cuda':
+        torch.cuda.synchronize()
+
     # ============================================================
     # Evaluation phase - Use FP32 precision to ensure accuracy
     # ============================================================
-    # Convert student parameters back to FP32 for precise evaluation
-    # (necessary if trained with BF16 on CUDA, no-op on MPS which uses FP32)
+    # Convert student parameters back to FP32 for precise evaluation (if trained with BF16)
     W = W.float()
     X = X.float()
 
@@ -681,22 +703,9 @@ def train_all_alphas_parallel(
     """
     Train all alpha values in parallel to dramatically reduce Python loop overhead.
 
-    Key optimization: Instead of 21 alphas × 200k steps = 4.2M Python loops,
-    we do 200k steps with all 21 alphas batched together = 200k Python loops.
-
+    Instead of: 21 alphas × 200k steps = 4.2M Python loops
+    We do: 200k steps with all 21 alphas batched = 200k Python loops
     This reduces CPU overhead by ~21x and improves GPU utilization.
-
-    Args:
-        Wt, Xt: Teacher parameters
-        alpha_values: List of alpha_tilde values to train
-        steps: Training steps
-        S: Samples per alpha
-        seed_for_init: Random seed
-        lr: Learning rate
-        loss_squared_sum: Loss computation mode
-
-    Returns:
-        Dictionary mapping alpha values to their results
     """
     device = Wt.device
     N1, M = Wt.shape
@@ -707,147 +716,111 @@ def train_all_alphas_parallel(
     alpha_scale = 1.0 / (M ** 0.5)
 
     print(f"\n[Parallel Alpha Training] Training {num_alphas} alphas simultaneously")
-    print(f"[Optimization] Reducing {num_alphas} × {steps} = {num_alphas * steps:,} loops")
-    print(f"               to {steps:,} loops (CPU overhead reduced by {num_alphas}x)")
+    print(f"[Optimization] Reducing {num_alphas} × {steps:,} = {num_alphas * steps:,} loops")
+    print(f"               to {steps:,} loops (CPU overhead reduced ~{num_alphas}x)")
 
-    # ============================================================
-    # Generate masks for all alphas upfront
-    # ============================================================
+    # Generate masks for all alphas
     print(f"[Step 1/4] Generating masks for {num_alphas} alphas...")
-
-    # Pre-generate all masks: shape (num_alphas, S, N1, N2)
     all_masks = []
     all_C_values = []
 
     for alpha_tilde in alpha_values:
-        if RESAMPLE_MASK_EACH_TRIAL and S > 1:
-            # Generate S different masks for this alpha
-            i_idx_batched, j_idx_batched, C = generate_batched_masks(
-                N1, N2, M, alpha_tilde, S, device, seed_base=SEED + 1000
-            )
-            # Build mask tensor (S, N1, N2)
-            A_alpha = torch.zeros((S, N1, N2), dtype=Wt.dtype, device=device)
-            assert i_idx_batched is not None and j_idx_batched is not None
-            for s in range(S):
-                if i_idx_batched[s].numel() > 0:
-                    A_s = A_alpha[s]
-                    A_s[i_idx_batched[s], j_idx_batched[s]] = 1.0
-        else:
-            # Single mask for this alpha, broadcast across S
-            i_idx, j_idx, C = sample_pairs_biregular_exact(
-                N1, N2, M, alpha_tilde, device, seed=SEED + int(alpha_tilde * 1000)
-            )
-            A_single = torch.zeros((N1, N2), dtype=Wt.dtype, device=device)
-            if i_idx is not None and i_idx.numel() > 0:
-                A_single[i_idx, j_idx] = 1.0
-            A_alpha = A_single.unsqueeze(0).expand(S, -1, -1).contiguous()
-
+        i_idx, j_idx, C = sample_pairs_biregular_exact(
+            N1, N2, M, alpha_tilde, device, seed=SEED + int(alpha_tilde * 1000)
+        )
+        A_single = torch.zeros((N1, N2), dtype=Wt.dtype, device=device)
+        if i_idx is not None and i_idx.numel() > 0:
+            A_single[i_idx, j_idx] = 1.0
+        A_alpha = A_single.unsqueeze(0).expand(S, -1, -1).contiguous()
         all_masks.append(A_alpha)
         all_C_values.append(C)
 
-    # Stack all masks: (num_alphas, S, N1, N2)
-    A_all = torch.stack(all_masks, dim=0)
+    A_all = torch.stack(all_masks, dim=0)  # (num_alphas, S, N1, N2)
 
-    # ============================================================
-    # Initialize student parameters for all alphas
-    # ============================================================
-    print(f"[Step 2/4] Initializing parameters for {num_alphas} alphas...")
-
+    # Initialize parameters (use FP32 storage, same as batched version)
+    print(f"[Step 2/4] Initializing parameters...")
     scale = 1.0 / (M ** 0.5)
     torch.manual_seed(seed_for_init)
+    W_all = torch.randn((num_alphas, S, N1, M), device=device, dtype=torch.float32) * scale
+    X_all = torch.randn((num_alphas, S, M, N2), device=device, dtype=torch.float32) * scale
 
-    # Shape: (num_alphas, S, N1, M) and (num_alphas, S, M, N2)
-    W_all = torch.randn((num_alphas, S, N1, M), device=device, dtype=COMPUTE_DTYPE) * scale
-    X_all = torch.randn((num_alphas, S, M, N2), device=device, dtype=COMPUTE_DTYPE) * scale
+    Y_teacher = Wt @ Xt
+    Y_teacher_expanded = Y_teacher.unsqueeze(0).unsqueeze(0)
 
-    # Prepare teacher output for broadcasting
-    Y_teacher = Wt @ Xt  # (N1, N2)
-    Y_teacher_expanded = Y_teacher.unsqueeze(0).unsqueeze(0)  # (1, 1, N1, N2)
+    # Parallel training loop with autocast support (same as batched version)
+    print(f"[Step 3/4] Training {num_alphas} alphas in parallel...")
+    for _ in tqdm(range(steps), desc="Training", leave=False, mininterval=0.5):
+        # Use autocast for mixed precision training (consistent with batched version)
+        with torch.autocast(device_type=device.type, dtype=COMPUTE_DTYPE, enabled=USE_BF16):
+            # Fused step for all alphas
+            Y_student = alpha_scale * torch.matmul(W_all, X_all)
+            Mres = (Y_teacher_expanded - Y_student) * A_all
+            grad_W = -2.0 * alpha_scale * torch.matmul(Mres, X_all.transpose(-2, -1))
 
-    # ============================================================
-    # Parallel training loop
-    # ============================================================
-    print(f"[Step 3/4] Training {num_alphas} alphas in parallel for {steps} steps...")
+        # Parameter update outside autocast (FP32)
+        W_all = W_all - lr * grad_W.float()
 
-    for step in tqdm(range(steps), desc="Parallel training", leave=False):
-        # Fused training step for all alphas simultaneously
-        # W_all: (num_alphas, S, N1, M)
-        # X_all: (num_alphas, S, M, N2)
-        # A_all: (num_alphas, S, N1, N2)
+        with torch.autocast(device_type=device.type, dtype=COMPUTE_DTYPE, enabled=USE_BF16):
+            Y_student2 = alpha_scale * torch.matmul(W_all, X_all)
+            Mres2 = (Y_teacher_expanded - Y_student2) * A_all
+            grad_X = -2.0 * alpha_scale * torch.matmul(W_all.transpose(-2, -1), Mres2)
 
-        # W gradient and update
-        Y_student = alpha_scale * torch.matmul(W_all, X_all)  # (num_alphas, S, N1, N2)
-        Mres = (Y_teacher_expanded - Y_student) * A_all
-        grad_W = -2.0 * alpha_scale * torch.matmul(Mres, X_all.transpose(-2, -1))
-        W_all = W_all - lr * grad_W
+        X_all = X_all - lr * grad_X.float()
 
-        # X gradient and update
-        Y_student2 = alpha_scale * torch.matmul(W_all, X_all)
-        Mres2 = (Y_teacher_expanded - Y_student2) * A_all
-        grad_X = -2.0 * alpha_scale * torch.matmul(W_all.transpose(-2, -1), Mres2)
-        X_all = X_all - lr * grad_X
+    # Synchronize device before collecting results
+    if device.type == 'mps':
+        torch.mps.synchronize()
+    elif device.type == 'cuda':
+        torch.cuda.synchronize()
 
-    # ============================================================
-    # Collect results for each alpha
-    # ============================================================
-    print(f"[Step 4/4] Collecting results for {num_alphas} alphas...")
-
+    # Collect results
+    print(f"[Step 4/4] Collecting results...")
     W_all = W_all.float()
     X_all = X_all.float()
-
     results = {}
 
     with torch.no_grad():
         for alpha_idx, alpha_tilde in enumerate(alpha_values):
-            W_alpha = W_all[alpha_idx]  # (S, N1, M)
-            X_alpha = X_all[alpha_idx]  # (S, M, N2)
-            A_alpha = A_all[alpha_idx]  # (S, N1, N2)
+            W_alpha = W_all[alpha_idx]
+            X_alpha = X_all[alpha_idx]
+            A_alpha = A_all[alpha_idx]
             C = all_C_values[alpha_idx]
 
-            # Compute metrics for each sample
             trial_results = []
             for s in range(S):
-                W_s = W_alpha[s]
-                X_s = X_alpha[s]
+                W_s, X_s = W_alpha[s], X_alpha[s]
 
-                # Overlaps
                 Q_W = gram_overlap_cosine(W_s, Wt, use_left=True)
                 Q_X = gram_overlap_cosine(X_s, Xt, use_left=False)
                 Q_W_prime = gram_overlap_zero_to_one(W_s, Wt, use_left=True)
                 Q_X_prime = gram_overlap_zero_to_one(X_s, Xt, use_left=False)
 
-                # Y overlap
                 Yp = W_s @ X_s
                 Yt = Y_teacher
                 Q_Y = float(((Yt.flatten() * Yp.flatten()).sum()) /
                            (Yt.norm() * Yp.norm() + 1e-12))
-
-                # Gen error and m^2
                 gen_error = float(torch.mean((Yt - Yp) ** 2).item())
+
                 num = (Yt * Yp).sum()
                 den = torch.sqrt((Yt ** 2).sum() * (Yp ** 2).sum()) + 1e-12
                 m_squared = float((num / den) ** 2)
 
-                # Final loss
                 Y_final = alpha_scale * (W_s @ X_s)
                 Rf = (Y_teacher - Y_final) * A_alpha[s]
-                if loss_squared_sum:
-                    final_loss = float(torch.sum(Rf) ** 2)
-                else:
-                    final_loss = float(torch.sum(Rf ** 2).item())
+                final_loss = float(torch.sum(Rf) ** 2) if loss_squared_sum else float(torch.sum(Rf ** 2).item())
 
                 trial_results.append({
-                    'Q_W': float(Q_W),
-                    'Q_X': float(Q_X),
-                    'Q_W_prime': float(Q_W_prime),
-                    'Q_X_prime': float(Q_X_prime),
-                    'Q_Y': float(Q_Y),
-                    'Gen_Error': float(gen_error),
-                    'm_squared': float(m_squared),
-                    'Final_Loss': final_loss
+                    'Q_W': float(Q_W), 'Q_X': float(Q_X),
+                    'Q_W_prime': float(Q_W_prime), 'Q_X_prime': float(Q_X_prime),
+                    'Q_Y': float(Q_Y), 'Gen_Error': float(gen_error),
+                    'm_squared': float(m_squared), 'Final_Loss': final_loss
                 })
 
-            # Aggregate statistics
+            # Aggregate
+            def mean_std(x):
+                x = np.array(x, dtype=float)
+                return float(x.mean()), float(x.std(ddof=1) if len(x) > 1 else 0.0)
+
             qW = [s['Q_W'] for s in trial_results]
             qX = [s['Q_X'] for s in trial_results]
             qW_prime = [s['Q_W_prime'] for s in trial_results]
@@ -856,10 +829,6 @@ def train_all_alphas_parallel(
             gen_err = [s['Gen_Error'] for s in trial_results]
             m_sq = [s['m_squared'] for s in trial_results]
             loss_list = [s['Final_Loss'] for s in trial_results]
-
-            def mean_std(x):
-                x = np.array(x, dtype=float)
-                return float(x.mean()), float(x.std(ddof=1) if len(x) > 1 else 0.0)
 
             QW_mean, QW_std = mean_std(qW)
             QX_mean, QX_std = mean_std(qX)
@@ -874,9 +843,7 @@ def train_all_alphas_parallel(
             aR_real = (C / (M * N2)) if (M * N2) > 0 else 0.0
 
             results[float(alpha_tilde)] = {
-                'alpha_tilde_left': aL_real,
-                'alpha_tilde_right': aR_real,
-                'C': int(C),
+                'alpha_tilde_left': aL_real, 'alpha_tilde_right': aR_real, 'C': int(C),
                 'Q_W_mean': QW_mean, 'Q_W_std': QW_std,
                 'Q_X_mean': QX_mean, 'Q_X_std': QX_std,
                 'Q_W_prime_mean': QW_prime_mean, 'Q_W_prime_std': QW_prime_std,
@@ -885,33 +852,54 @@ def train_all_alphas_parallel(
                 'Gen_Error_mean': GE_mean, 'Gen_Error_std': GE_std,
                 'm_squared_mean': M2_mean, 'm_squared_std': M2_std,
                 'Loss_mean': L_mean, 'Loss_std': L_std,
-                'epochs_mean': float(steps),
-                'Time_s_mean': 0.0
+                'epochs_mean': float(steps), 'Time_s_mean': 0.0
             }
 
-    print(f"[Parallel Alpha Training] Completed!")
+    print(f"✓ Parallel training completed!")
     return results
 
 
 # ------------------------------------------------------------
-# Experiment Runner
+# Experiment Runner (using parallel alpha training)
+# ------------------------------------------------------------
+def run_experiment_parallel_alpha():
+    """Run experiment with all alphas trained in parallel"""
+    set_seed(SEED)
+    Wt, Xt = create_teacher_dense(N1, N2, M, DEVICE, seed=SEED)
+
+    a_vals = np.arange(ALPHA_TILDE_START, ALPHA_TILDE_STOP + 1e-12, ALPHA_TILDE_STEP)
+
+    print(f"\n{'='*70}")
+    print(f"STARTING PARALLEL ALPHA EXPERIMENT")
+    print(f"{'='*70}")
+    print(f"Alpha range: {ALPHA_TILDE_START} to {ALPHA_TILDE_STOP}, step {ALPHA_TILDE_STEP}")
+    print(f"Number of alphas: {len(a_vals)}")
+    print(f"Training steps: {EPOCHS_PER_ALPHA:,}")
+    print(f"{'='*70}\n")
+
+    total_start = time.time()
+    results = train_all_alphas_parallel(
+        Wt, Xt, a_vals,
+        steps=EPOCHS_PER_ALPHA,
+        S=SAMPLES_PER_ALPHA,
+        seed_for_init=SEED + 10_000,
+        lr=LEARNING_RATE,
+        loss_squared_sum=True
+    )
+    total_time = time.time() - total_start
+
+    print(f"\n✓ Total time: {total_time:.2f}s")
+    return results
+
+
+# ------------------------------------------------------------
+# Experiment Runner (original version for comparison)
 # ------------------------------------------------------------
 def run_experiment_batched():
     set_seed(SEED)
     Wt, Xt = create_teacher_dense(N1, N2, M, DEVICE, seed=SEED)
 
-    # Check for smart alphas (adaptive sampling)
-    smart_alpha_path = Path(f"Result/{N1}_{N2}_{M}/smart_alphas.npy")
-    if smart_alpha_path.exists():
-        a_vals = np.load(smart_alpha_path)
-        print(f"\n{'='*80}")
-        print(f"[ADAPTIVE SAMPLING] Using {len(a_vals)} smart alphas")
-        print(f"[Range] α ∈ [{a_vals[0]:.2f}, {a_vals[-1]:.2f}]")
-        print(f"[Speedup] ~{int((ALPHA_TILDE_STOP - ALPHA_TILDE_START) / ALPHA_TILDE_STEP / len(a_vals))}x vs uniform Δα={ALPHA_TILDE_STEP}")
-        print(f"{'='*80}\n")
-    else:
-        a_vals = np.arange(ALPHA_TILDE_START, ALPHA_TILDE_STOP + 1e-12, ALPHA_TILDE_STEP)
-        print(f"\n[Uniform Sampling] Using {len(a_vals)} alphas, Δα={ALPHA_TILDE_STEP}")
+    a_vals = np.arange(ALPHA_TILDE_START, ALPHA_TILDE_STOP + 1e-12, ALPHA_TILDE_STEP)
     results = {}
 
     pbar = tqdm(a_vals,
@@ -1247,14 +1235,11 @@ def plot_results(results_dict):
 # ------------------------------------------------------------
 if __name__ == "__main__":
     print("\n" + "=" * 100)
-    print("Starting Sparse Matrix simulation")
+    print("MULTI-ALPHA PARALLEL TRAINING - Optimized Version")
     print("=" * 100)
 
-    total_start = time.time()
-    results = run_experiment_batched()
-    total_time = time.time() - total_start
-
-    print(f"\n✓ Total time: {total_time:.2f}s")
+    # Use parallel alpha training (much faster)
+    results = run_experiment_parallel_alpha()
 
     df = display_results(results)
     plot_results(results)
