@@ -15,19 +15,19 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
 from scipy.optimize import curve_fit
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 # ============================================================
 # 参数配置 - 在这里修改
 # ============================================================
 
 # JSON结果文件路径（相对路径）
-JSON_PATH = "Result_compareNM/200x50_400x50_800x50_2000x50_5000x50/multi_size_results_steps5000.json"
+JSON_PATH = "Result_compareNM/500x50_1000x50_1500x50_2000x50/multi_size_results_steps2000.json"
 
 # 线性拟合的alpha范围
 # 设为 None 则自动检测，设为具体值则手动指定
 ALPHA_START = 0.5  # 例如: 0.5
-ALPHA_END = 1.4    # 例如: 1.5
+ALPHA_END = 1.5    # 例如: 1.5
 
 # 输出目录（None = 与输入文件同目录）
 OUTPUT_DIR = None
@@ -230,7 +230,7 @@ def fit_slope_vs_ratio(ratios_NM: np.ndarray, slopes: np.ndarray) -> Dict:
             'a': popt[0], 'b': popt[1], 'R2': r2,
             'formula': f'slope = {popt[0]:.6f} * (M/N)^{popt[1]:.4f}'
         }
-    except Exception as e:
+    except Exception:
         results['power_law'] = None
 
     return results
@@ -411,7 +411,7 @@ def generate_report(configs, linear_fits, slope_analysis, best_model) -> str:
     # 分析过原点线性拟合
     if slope_analysis.get('linear_origin'):
         lo = slope_analysis['linear_origin']
-        lines.append(f"### 过原点线性拟合 (最重要)\n")
+        lines.append("### 过原点线性拟合 (最重要)\n")
         lines.append(f"**公式**: `slope = {lo['a']:.4f} × (M/N)`\n")
         lines.append(f"**R² = {lo['R2']:.4f}**\n")
 
@@ -426,7 +426,7 @@ def generate_report(configs, linear_fits, slope_analysis, best_model) -> str:
     # 分析幂律拟合
     if slope_analysis.get('power_law'):
         pl = slope_analysis['power_law']
-        lines.append(f"### 幂律拟合\n")
+        lines.append("### 幂律拟合\n")
         lines.append(f"**公式**: `slope = {pl['a']:.4f} × (M/N)^{pl['b']:.3f}`\n")
         lines.append(f"**R² = {pl['R2']:.4f}**\n")
 
@@ -453,10 +453,10 @@ def generate_report(configs, linear_fits, slope_analysis, best_model) -> str:
 
     if slope_analysis.get('linear_origin') and slope_analysis['linear_origin']['R2'] > 0.9:
         a = slope_analysis['linear_origin']['a']
-        lines.append(f"数据支持以下经验公式：\n")
-        lines.append(f"```")
+        lines.append("数据支持以下经验公式：\n")
+        lines.append("```")
         lines.append(f"dQ_Y/dα ≈ {a:.2f} × (M/N)    (相变前线性区)")
-        lines.append(f"```\n")
+        lines.append("```\n")
         lines.append("即相变前 Q_Y 的增长速率与 M/N 成正比，比例系数约为 " + f"{a:.2f}。")
     else:
         lines.append(f"最佳拟合模型为 **{best_model}**，但数据可能需要更多样本点来确认关系。")
@@ -470,7 +470,7 @@ def main():
 
     if not json_path.exists():
         print(f"错误：文件不存在 {json_path}")
-        print(f"请检查 JSON_PATH 配置是否正确")
+        print("请检查 JSON_PATH 配置是否正确")
         return
 
     print("=" * 70)

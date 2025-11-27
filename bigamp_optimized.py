@@ -26,7 +26,6 @@ import torch
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from dataclasses import dataclass
-from typing import Optional, Literal
 
 # ============================================================
 # Default Parameters
@@ -205,7 +204,7 @@ def select_memory_mode(N1, N2, M, S, num_alphas, mode_override='auto'):
     teacher_mem = (N1 * M + M * N2 + N1 * N2) * 4 / (1024**3)
     single_mask_mem = N1 * N2 * 4 / (1024**3)
 
-    print(f"\n[Memory Mode Selection]")
+    print("\n[Memory Mode Selection]")
     print(f"  Matrix: {N1}x{N2}, M={M}, S={S}")
     print(f"  Available: {effective_available:.1f} GB")
     print(f"  Per-alpha training: {per_alpha_mem:.2f} GB")
@@ -227,10 +226,10 @@ def select_memory_mode(N1, N2, M, S, num_alphas, mode_override='auto'):
         print(f"  Selected: parallel (batch={min(max_batch, num_alphas)})")
     elif per_alpha_mem + single_mask_mem < effective_available * 0.8:
         mode = "optimized"
-        print(f"  Selected: optimized (sequential, on-demand masks)")
+        print("  Selected: optimized (sequential, on-demand masks)")
     else:
         mode = "extreme"
-        print(f"  Selected: extreme (FP16 + sequential)")
+        print("  Selected: extreme (FP16 + sequential)")
 
     return mode
 
@@ -394,7 +393,6 @@ def train_bigamp_single(Wt, Xt, Y_teacher, alpha, steps, S, seed,
 def evaluate_batch(W, X, Wt, Xt, Y_teacher, alpha_values, S):
     """Evaluate metrics for all alphas"""
     results = {}
-    num_alphas = len(alpha_values)
 
     for a_idx, alpha in enumerate(alpha_values):
         trial_results = []
@@ -535,7 +533,7 @@ def run_parallel_mode(alpha_values, steps, S):
     max_parallel = calculate_smart_parallelism(N1, N2, M, S, num_alphas)
 
     print(f"\n{'='*70}")
-    print(f"BiG-AMP TRAINING - PARALLEL MODE")
+    print("BiG-AMP TRAINING - PARALLEL MODE")
     print(f"{'='*70}")
     print(f"Matrix: {N1}x{N2}, M={M}")
     print(f"Device: {DEVICE_INFO.device_name}, Memory: {DEVICE_INFO.available_memory_gb:.1f} GB")
