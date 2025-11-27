@@ -231,6 +231,30 @@ class PrecisePhaseAnalyzer:
 
         return alpha_c_inf, max(0, r_squared)
 
+    def _auto_step_levels(self) -> List[int]:
+        """
+        Automatically determine step_levels based on matrix size.
+
+        Larger matrices need more BiG-AMP iterations to converge.
+        Reference: Main_bigamp_optimized.py uses 5000 steps for N=10000.
+        """
+        N = max(self.N1, self.N2)
+
+        if N <= 500:
+            # Small matrices: quick convergence
+            return [200, 400, 800, 1600]
+        elif N <= 2000:
+            # Medium matrices
+            return [500, 1000, 2000, 4000]
+        elif N <= 5000:
+            # Large matrices
+            return [1000, 2000, 3000, 5000]
+        else:
+            # Very large matrices (N > 5000)
+            # Main_bigamp_optimized.py uses 5000 for N=10000
+            # Use practical step levels that don't take forever
+            return [1000, 2000, 4000, 6000]
+
     def analyze(self,
                 initial_range: Tuple[float, float] = (0.0, 4.0),
                 step_levels: List[int] = None,
@@ -244,7 +268,7 @@ class PrecisePhaseAnalyzer:
 
         Args:
             initial_range: Initial alpha range to scan
-            step_levels: List of step counts to use [200, 500, 1000, 2000, ...]
+            step_levels: List of step counts to use (auto-scaled if None)
             convergence_threshold: Stop when |delta_alpha_c| < this
             convergence_patience: Converged if stable for this many rounds
             n_points_initial: Points for initial scan
@@ -255,7 +279,7 @@ class PrecisePhaseAnalyzer:
             PreciseAnalysisResult
         """
         if step_levels is None:
-            step_levels = [200, 400, 800, 1600]
+            step_levels = self._auto_step_levels()
 
         self.history = []
         converged = False
@@ -486,16 +510,14 @@ def run_precise_analysis(
     Args:
         N1, N2, M: Matrix dimensions
         samples: Samples per alpha
-        step_levels: List of step counts (default: [200, 400, 800, 1600])
+        step_levels: List of step counts (auto-scaled based on N if None)
         verbose: Show progress
         save_dir: Directory to save results
 
     Returns:
         PreciseAnalysisResult
     """
-    if step_levels is None:
-        step_levels = [200, 400, 800, 1600]
-
+    # step_levels will be auto-scaled in analyzer.analyze() if None
     analyzer = PrecisePhaseAnalyzer(N1=N1, N2=N2, M=M, samples_per_alpha=samples)
     result = analyzer.analyze(step_levels=step_levels, verbose=verbose)
 

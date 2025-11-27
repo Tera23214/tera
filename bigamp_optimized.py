@@ -31,20 +31,20 @@ from typing import Optional, Literal
 # ============================================================
 # Default Parameters
 # ============================================================
-N1 = 10000
-N2 = 10000
+N1 = 300
+N2 = 300
 M = 100
 
 ALPHA_TILDE_START = 0
-ALPHA_TILDE_STOP = 2
+ALPHA_TILDE_STOP = 4
 ALPHA_TILDE_STEP = 0.1
 
 # BiG-AMP parameters
 DAMPING = 0.5
-NOISE_VAR = 1e-6
-MAX_STEPS = 200
+NOISE_VAR = 1e-10
+MAX_STEPS = 1000
 
-SAMPLES_PER_ALPHA = 5
+SAMPLES_PER_ALPHA = 1
 SEED = 42
 
 # Device setup
@@ -157,26 +157,40 @@ def gram_overlap_cosine(A, B, use_left=True):
 
 @torch.no_grad()
 def gram_overlap_zero_to_one(A, B, use_left=True):
-    """Compute normalized Gram overlap in [0, 1] range"""
-    cosine = gram_overlap_cosine(A, B, use_left)
-    return (cosine + 1.0) / 2.0
+    """
+    Compute normalized Gram overlap in [0, 1] range with baseline correction.
+
+    Uses baseline b = m/(m+n+1) which is the expected cosine for random matrices.
+    This ensures random initialization gives Q' ≈ 0, and perfect match gives Q' = 1.
+    """
+    q = gram_overlap_cosine(A, B, use_left)
+    if use_left:
+        n, m = A.shape
+    else:
+        n, m = A.shape[1], A.shape[0]
+    b = m / (m + n + 1)  # baseline: expected cosine for random matrices
+    qc = (q - b) / (1.0 - b + 1e-12)  # baseline correction
+    return float(max(0.0, min(1.0, qc)))
 
 
 # ============================================================
 # Memory Management
 # ============================================================
 def estimate_memory_per_alpha(N1, N2, M, S, dtype_bytes=4):
-    """Estimate GPU memory needed per alpha value for BiG-AMP"""
-    # BiG-AMP needs more memory than AGD due to variance tensors
-    # w_hat, x_hat: S × N1 × M + S × M × N2
-    # w_var, x_var: S × N1 × M + S × M × N2
-    # Intermediate: Y_student (S × N1 × N2), residual, etc.
+    """Estimate GPU memory needed per alpha value for BiG-AMP
 
+    BiG-AMP creates many N1×N2 tensors simultaneously in each step:
+    - W update: z_hat, p_var, V, residual, s, A/V temp (6)
+    - X update: z_hat2, p_var2, V2, residual2, s2, A/V2 temp (6)
+    - Plus A_all mask (1)
+    Total: ~13 N1×N2 tensors per alpha batch + safety margin = 16
+    """
     student_params = 2 * (S * N1 * M + S * M * N2)  # w_hat, x_hat, w_var, x_var
-    intermediate = 4 * S * N1 * N2  # Y, residual, s, V
-    gradients = 2 * S * N1 * N2  # tau_W, tau_X computations
 
-    total_elements = student_params + intermediate + gradients
+    # CRITICAL: BiG-AMP needs ~13 N1×N2 tensors simultaneously, use 16 for safety
+    intermediate = 16 * S * N1 * N2
+
+    total_elements = student_params + intermediate
     return total_elements * dtype_bytes / (1024**3)
 
 
@@ -187,29 +201,33 @@ def select_memory_mode(N1, N2, M, S, num_alphas, mode_override='auto'):
     effective_available = MAX_GPU_MEMORY_GB - RESERVED_MEMORY_GB
 
     # Memory estimates
-    masks_mem = num_alphas * N1 * N2 * 4 / (1024**3)
-    teacher_mem = (N1 * M + M * N2 + N1 * N2) * 4 / (1024**3)
     per_alpha_mem = estimate_memory_per_alpha(N1, N2, M, S)
+    teacher_mem = (N1 * M + M * N2 + N1 * N2) * 4 / (1024**3)
+    single_mask_mem = N1 * N2 * 4 / (1024**3)
 
     print(f"\n[Memory Mode Selection]")
     print(f"  Matrix: {N1}x{N2}, M={M}, S={S}")
     print(f"  Available: {effective_available:.1f} GB")
-    print(f"  All masks: {masks_mem:.2f} GB")
-    print(f"  Per-alpha: {per_alpha_mem:.2f} GB")
+    print(f"  Per-alpha training: {per_alpha_mem:.2f} GB")
+    print(f"  Single mask: {single_mask_mem:.2f} GB")
 
     if mode_override != 'auto':
         print(f"  Mode override: {mode_override}")
         return mode_override
 
-    # Auto-select
-    total_parallel_mem = masks_mem + teacher_mem + per_alpha_mem * min(num_alphas, 5)
+    # Calculate how many alphas can fit in parallel mode
+    # Each batch needs: batch_masks + teacher + per_alpha_mem * batch_size
+    # Solve for max batch_size: batch_size * (per_alpha_mem + single_mask_mem) + teacher_mem < available * 0.85
+    usable_mem = effective_available * 0.85 - teacher_mem
+    mem_per_batch_alpha = per_alpha_mem + single_mask_mem
+    max_batch = max(1, int(usable_mem / mem_per_batch_alpha))
 
-    if total_parallel_mem < effective_available * 0.85:
+    if max_batch >= 2:
         mode = "parallel"
-        print(f"  Selected: parallel (batched processing)")
-    elif per_alpha_mem < effective_available * 0.7:
+        print(f"  Selected: parallel (batch={min(max_batch, num_alphas)})")
+    elif per_alpha_mem + single_mask_mem < effective_available * 0.8:
         mode = "optimized"
-        print(f"  Selected: optimized (sequential, no mask pre-storage)")
+        print(f"  Selected: optimized (sequential, on-demand masks)")
     else:
         mode = "extreme"
         print(f"  Selected: extreme (FP16 + sequential)")
@@ -223,12 +241,18 @@ def calculate_smart_parallelism(N1, N2, M, S, num_alphas):
     RESERVED_MEMORY_GB = 3.0
     available = MAX_GPU_MEMORY_GB - RESERVED_MEMORY_GB
 
-    mem_per_alpha = estimate_memory_per_alpha(N1, N2, M, S)
+    per_alpha_mem = estimate_memory_per_alpha(N1, N2, M, S)
+    teacher_mem = (N1 * M + M * N2 + N1 * N2) * 4 / (1024**3)
+    single_mask_mem = N1 * N2 * 4 / (1024**3)
 
-    if mem_per_alpha <= 0:
+    # Each batch alpha needs: training memory + mask storage
+    mem_per_batch_alpha = per_alpha_mem + single_mask_mem
+    usable_mem = available * 0.85 - teacher_mem
+
+    if mem_per_batch_alpha <= 0:
         return num_alphas
 
-    max_parallel = max(1, min(int(available / mem_per_alpha), num_alphas))
+    max_parallel = max(1, min(int(usable_mem / mem_per_batch_alpha), num_alphas))
     return max_parallel
 
 
@@ -402,6 +426,21 @@ def evaluate_batch(W, X, Wt, Xt, Y_teacher, alpha_values, S):
             metrics[f'{key}_mean'] = float(np.mean(vals))
             metrics[f'{key}_std'] = float(np.std(vals, ddof=1) if len(vals) > 1 else 0.0)
 
+        # Compute replica overlap when S > 1
+        if S > 1:
+            W_alpha = W[a_idx] if W.dim() == 4 else W  # (S, N1, M)
+            X_alpha = X[a_idx] if X.dim() == 4 else X  # (S, M, N2)
+            Q_W_rep, Q_W_rep_std, Q_X_rep, Q_X_rep_std = compute_replica_overlap(W_alpha, X_alpha)
+            metrics['Q_W_replica_mean'] = Q_W_rep
+            metrics['Q_W_replica_std'] = Q_W_rep_std
+            metrics['Q_X_replica_mean'] = Q_X_rep
+            metrics['Q_X_replica_std'] = Q_X_rep_std
+        else:
+            metrics['Q_W_replica_mean'] = 0.0
+            metrics['Q_W_replica_std'] = 0.0
+            metrics['Q_X_replica_mean'] = 0.0
+            metrics['Q_X_replica_std'] = 0.0
+
         results[float(alpha)] = metrics
 
     return results
@@ -436,7 +475,51 @@ def evaluate_single(W, X, Wt, Xt, Y_teacher, S):
         metrics[f'{key}_mean'] = float(np.mean(vals))
         metrics[f'{key}_std'] = float(np.std(vals, ddof=1) if len(vals) > 1 else 0.0)
 
+    # Compute replica overlap when S > 1
+    if S > 1:
+        Q_W_rep, Q_W_rep_std, Q_X_rep, Q_X_rep_std = compute_replica_overlap(W, X)
+        metrics['Q_W_replica_mean'] = Q_W_rep
+        metrics['Q_W_replica_std'] = Q_W_rep_std
+        metrics['Q_X_replica_mean'] = Q_X_rep
+        metrics['Q_X_replica_std'] = Q_X_rep_std
+    else:
+        metrics['Q_W_replica_mean'] = 0.0
+        metrics['Q_W_replica_std'] = 0.0
+        metrics['Q_X_replica_mean'] = 0.0
+        metrics['Q_X_replica_std'] = 0.0
+
     return metrics
+
+
+@torch.no_grad()
+def compute_replica_overlap(W_all, X_all):
+    """
+    Compute pairwise Gram overlap between S replicas (no normalization).
+
+    Args:
+        W_all: (S, N1, M) - S replicas of W
+        X_all: (S, M, N2) - S replicas of X
+
+    Returns:
+        Q_W_mean, Q_W_std, Q_X_mean, Q_X_std (raw cosine values)
+    """
+    S = W_all.shape[0]
+    if S < 2:
+        return 0.0, 0.0, 0.0, 0.0
+
+    Q_W_list, Q_X_list = [], []
+
+    for i in range(S):
+        for j in range(i + 1, S):
+            Q_W_list.append(gram_overlap_cosine(W_all[i], W_all[j], use_left=True))
+            Q_X_list.append(gram_overlap_cosine(X_all[i], X_all[j], use_left=False))
+
+    Q_W_mean = float(np.mean(Q_W_list))
+    Q_W_std = float(np.std(Q_W_list, ddof=1)) if len(Q_W_list) > 1 else 0.0
+    Q_X_mean = float(np.mean(Q_X_list))
+    Q_X_std = float(np.std(Q_X_list, ddof=1)) if len(Q_X_list) > 1 else 0.0
+
+    return Q_W_mean, Q_W_std, Q_X_mean, Q_X_std
 
 
 # ============================================================
@@ -543,65 +626,132 @@ def run_sequential_mode(alpha_values, steps, S, use_fp16=False):
 # Visualization
 # ============================================================
 def plot_results(results, alpha_values, save_path):
-    """Generate result plots"""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    """
+    Generate result plots (Main.py style combined chart + parameter table)
 
-    # Colors
-    MAIN_COLOR = '#2563eb'
-    SECONDARY_COLOR = '#dc2626'
+    Creates a combined figure with:
+    - Upper part: Q_Y, Q_W', Q_X' curves
+    - Lower part: Parameter table
+    """
+    # Extract data
+    aL = np.array(alpha_values)
+    qY_mu = np.array([results[a]['Q_Y_mean'] for a in alpha_values])
+    qW_prime_mu = np.array([results[a]['Q_W_prime_mean'] for a in alpha_values])
+    qX_prime_mu = np.array([results[a]['Q_X_prime_mean'] for a in alpha_values])
 
-    # Plot 1: Q_Y
-    ax1 = axes[0, 0]
-    qy_mean = [results[a]['Q_Y_mean'] for a in alpha_values]
-    qy_std = [results[a]['Q_Y_std'] for a in alpha_values]
-    ax1.errorbar(alpha_values, qy_mean, yerr=qy_std, fmt='o-', color=MAIN_COLOR,
-                 capsize=3, markersize=6, linewidth=2, label='Q_Y')
-    ax1.set_xlabel(r'$\tilde{\alpha}$', fontsize=12)
-    ax1.set_ylabel('Q_Y', fontsize=12)
-    ax1.set_title('Y Overlap (Q_Y)', fontsize=14, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(-0.05, 1.05)
+    # ============================================================
+    # Combined chart + parameter table (Two-tier layout)
+    # ============================================================
+    fig_combined = plt.figure(figsize=(10, 10))
 
-    # Plot 2: Q_W' and Q_X'
-    ax2 = axes[0, 1]
-    qw_mean = [results[a]['Q_W_prime_mean'] for a in alpha_values]
-    qx_mean = [results[a]['Q_X_prime_mean'] for a in alpha_values]
-    ax2.plot(alpha_values, qw_mean, 'o-', color=MAIN_COLOR, markersize=6, linewidth=2, label="Q_W'")
-    ax2.plot(alpha_values, qx_mean, 's-', color=SECONDARY_COLOR, markersize=6, linewidth=2, label="Q_X'")
-    ax2.set_xlabel(r'$\tilde{\alpha}$', fontsize=12)
-    ax2.set_ylabel("Q' (normalized)", fontsize=12)
-    ax2.set_title("Normalized Gram Overlaps", fontsize=14, fontweight='bold')
-    ax2.legend(loc='lower right')
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylim(-0.05, 1.05)
+    # Upper half: Combined metrics plot
+    ax_plot = plt.subplot2grid((3, 1), (0, 0), rowspan=2, fig=fig_combined)
 
-    # Plot 3: Generalization Error
-    ax3 = axes[1, 0]
-    ge_mean = [results[a]['Gen_Error_mean'] for a in alpha_values]
-    ax3.semilogy(alpha_values, ge_mean, 'o-', color=MAIN_COLOR, markersize=6, linewidth=2)
-    ax3.set_xlabel(r'$\tilde{\alpha}$', fontsize=12)
-    ax3.set_ylabel('Generalization Error (log)', fontsize=12)
-    ax3.set_title('Generalization Error', fontsize=14, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
+    # Three lines, thinner lines, no variance bands
+    ax_plot.plot(aL, qY_mu, marker='D', linewidth=1.5, markersize=5,
+                 color='#d62728', label='Q_Y (invariant)', zorder=3)
+    ax_plot.plot(aL, qW_prime_mu, marker='o', linewidth=1.5, markersize=5,
+                 color='#9467bd', label="Q_W' (zero-to-one)", zorder=2)
+    ax_plot.plot(aL, qX_prime_mu, marker='v', linewidth=1.5, markersize=5,
+                 color='#8c564b', label="Q_X' (zero-to-one)", zorder=1)
 
-    # Plot 4: Q_W and Q_X (cosine)
-    ax4 = axes[1, 1]
-    qw_cos = [results[a]['Q_W_mean'] for a in alpha_values]
-    qx_cos = [results[a]['Q_X_mean'] for a in alpha_values]
-    ax4.plot(alpha_values, qw_cos, 'o-', color=MAIN_COLOR, markersize=6, linewidth=2, label='Q_W')
-    ax4.plot(alpha_values, qx_cos, 's-', color=SECONDARY_COLOR, markersize=6, linewidth=2, label='Q_X')
-    ax4.set_xlabel(r'$\tilde{\alpha}$', fontsize=12)
-    ax4.set_ylabel('Q (cosine)', fontsize=12)
-    ax4.set_title('Gram Overlaps (Cosine)', fontsize=14, fontweight='bold')
-    ax4.legend(loc='lower right')
-    ax4.grid(True, alpha=0.3)
+    ax_plot.set_xlabel(r'$\tilde{\alpha}_L = C / (M \cdot N_1)$', fontsize=13)
+    ax_plot.set_ylabel('Overlap Metrics', fontsize=13)
+    ax_plot.set_title('Combined Metrics: Q_Y and Zero-to-One Method', fontsize=14, fontweight='bold')
+    ax_plot.set_ylim(-0.05, 1.05)
+    ax_plot.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax_plot.legend(fontsize=11, loc='lower right')
 
-    plt.suptitle(f'BiG-AMP Results: {N1}×{N2}, M={M}, Steps={MAX_STEPS}',
-                 fontsize=16, fontweight='bold', y=1.02)
+    # Lower half: Parameter table
+    ax_table = plt.subplot2grid((3, 1), (2, 0), fig=fig_combined)
+    ax_table.axis('off')
+
+    # Prepare parameter table data
+    table_data = [
+        ['Model Parameters', f'N1={N1}, N2={N2}, M={M}'],
+        ['Algorithm', 'BiG-AMP'],
+        ['Damping', f'{DAMPING}'],
+        ['Noise Variance', f'{NOISE_VAR}'],
+        ['Steps', f'{MAX_STEPS}'],
+        ['Samples per Alpha', f'{SAMPLES_PER_ALPHA}'],
+    ]
+
+    # Create table
+    table = ax_table.table(cellText=table_data,
+                          colWidths=[0.35, 0.65],
+                          cellLoc='left',
+                          loc='center',
+                          bbox=(0, 0, 1, 1))
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2)
+
+    # Set table style
+    for i in range(len(table_data)):
+        table[(i, 0)].set_facecolor('#e6f2ff')
+        table[(i, 0)].set_text_props(weight='bold')
+        table[(i, 1)].set_facecolor('#f0f0f0')
+
     plt.tight_layout()
 
-    fig.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    # Save chart
+    fig_combined.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Plot saved: {save_path}")
+    plt.close(fig_combined)
+
+
+def plot_replica_comparison(results, alpha_values, save_path):
+    """
+    Generate replica comparison plot
+
+    Compares:
+    - Q_W', Q_X' (teacher vs student, normalized to 0-1)
+    - Q_W_replica, Q_X_replica (replica vs replica, raw cosine)
+    """
+    # Extract data
+    aL = np.array(alpha_values)
+    qW_prime_mu = np.array([results[a]['Q_W_prime_mean'] for a in alpha_values])
+    qX_prime_mu = np.array([results[a]['Q_X_prime_mean'] for a in alpha_values])
+    qW_rep_mu = np.array([results[a].get('Q_W_replica_mean', 0.0) for a in alpha_values])
+    qX_rep_mu = np.array([results[a].get('Q_X_replica_mean', 0.0) for a in alpha_values])
+
+    # Check if replica data exists
+    has_replica = np.any(qW_rep_mu != 0) or np.any(qX_rep_mu != 0)
+    if not has_replica:
+        print("No replica overlap data (S=1), skipping replica comparison plot")
+        return
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+
+    # Upper plot: Q_W comparison
+    ax1.plot(aL, qW_prime_mu, marker='o', linewidth=1.5, markersize=5,
+             color='#9467bd', label="Q_W' (teacher-student, normalized)", zorder=2)
+    ax1.plot(aL, qW_rep_mu, marker='s', linewidth=1.5, markersize=5,
+             color='#2ca02c', label="Q_W_replica (replica-replica, raw cosine)", zorder=1)
+
+    ax1.set_ylabel('W Overlap', fontsize=13)
+    ax1.set_title('W Overlap Comparison: Teacher-Student vs Replica-Replica', fontsize=14, fontweight='bold')
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax1.legend(fontsize=10, loc='lower right')
+
+    # Lower plot: Q_X comparison
+    ax2.plot(aL, qX_prime_mu, marker='v', linewidth=1.5, markersize=5,
+             color='#8c564b', label="Q_X' (teacher-student, normalized)", zorder=2)
+    ax2.plot(aL, qX_rep_mu, marker='^', linewidth=1.5, markersize=5,
+             color='#17becf', label="Q_X_replica (replica-replica, raw cosine)", zorder=1)
+
+    ax2.set_xlabel(r'$\tilde{\alpha}_L = C / (M \cdot N_1)$', fontsize=13)
+    ax2.set_ylabel('X Overlap', fontsize=13)
+    ax2.set_title('X Overlap Comparison: Teacher-Student vs Replica-Replica', fontsize=14, fontweight='bold')
+    ax2.set_ylim(-0.05, 1.05)
+    ax2.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax2.legend(fontsize=10, loc='lower right')
+
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Replica comparison plot saved: {save_path}")
     plt.close(fig)
 
 
@@ -669,9 +819,13 @@ def main():
         json.dump(results_data, f, indent=2)
     print(f"Results saved: {results_path}")
 
-    # Plot
-    plot_path = RESULT_DIR / f'bigamp_results_steps{MAX_STEPS}.png'
-    plot_results(results, [float(a) for a in alpha_values], plot_path)
+    # Plot 1: Teacher-student (Main.py style: Q_Y + Q_W' + Q_X' with parameter table)
+    plot_path1 = RESULT_DIR / f'bigamp_teacher_student_steps{MAX_STEPS}.png'
+    plot_results(results, [float(a) for a in alpha_values], plot_path1)
+
+    # Plot 2: Replica comparison (Q_W'/Q_X' vs Q_W_replica/Q_X_replica)
+    plot_path2 = RESULT_DIR / f'bigamp_replica_comparison_steps{MAX_STEPS}.png'
+    plot_replica_comparison(results, [float(a) for a in alpha_values], plot_path2)
 
     # Summary
     print(f"\n{'='*70}")
@@ -680,7 +834,8 @@ def main():
     print(f"Mode: {mode}")
     print(f"Total time: {total_time:.1f}s")
     print(f"Results: {results_path}")
-    print(f"Plot: {plot_path}")
+    print(f"Plot 1: {plot_path1}")
+    print(f"Plot 2: {plot_path2}")
     print(f"{'='*70}")
 
 

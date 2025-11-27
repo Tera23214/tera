@@ -28,8 +28,8 @@ def main():
     parser.add_argument("--N2", type=int, default=None, help="Matrix dimension N2 (default: same as N1)")
     parser.add_argument("--M", type=int, default=50, help="Latent dimension M")
     parser.add_argument("--samples", type=int, default=5, help="Samples per alpha")
-    parser.add_argument("--steps", type=str, default="200,400,800,1600",
-                        help="Comma-separated list of step levels")
+    parser.add_argument("--steps", type=str, default=None,
+                        help="Comma-separated list of step levels (auto-scaled if not specified)")
     parser.add_argument("--threshold", type=float, default=0.02,
                         help="Convergence threshold for alpha_c")
     parser.add_argument("--patience", type=int, default=2,
@@ -39,7 +39,12 @@ def main():
     args = parser.parse_args()
 
     N2 = args.N2 if args.N2 is not None else args.N1
-    step_levels = [int(s.strip()) for s in args.steps.split(",")]
+
+    # Parse step_levels or use auto-scaling
+    if args.steps is not None:
+        step_levels = [int(s.strip()) for s in args.steps.split(",")]
+    else:
+        step_levels = None  # Will be auto-scaled based on matrix size
 
     # Output directory
     result_dir = Path(__file__).parent.parent / "Result" / f"{args.N1}_{N2}_{args.M}"
