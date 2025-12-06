@@ -33,7 +33,7 @@ import itertools
 # Default Parameters
 # ============================================================
 N1 = 10000
-N2 = 1000
+N2 = 10000
 M = 100
 
 ALPHA_TILDE_START = 0
