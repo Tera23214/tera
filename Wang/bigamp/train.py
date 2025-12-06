@@ -32,8 +32,8 @@ import itertools
 # ============================================================
 # Default Parameters
 # ============================================================
-N1 = 300
-N2 = 300
+N1 = 10000
+N2 = 1000
 M = 100
 
 ALPHA_TILDE_START = 0
@@ -43,7 +43,7 @@ ALPHA_TILDE_STEP = 0.1
 # BiG-AMP parameters
 DAMPING = 0.5
 NOISE_VAR = 1e-10
-MAX_STEPS = 1000
+MAX_STEPS = 5000
 
 SAMPLES_PER_ALPHA = 1
 RESAMPLE_MASK_EACH_TRIAL = True  # True: each trial gets different mask, False: all trials share same mask
