@@ -1,0 +1,55 @@
+# =============================================================================
+# Git Whitelist Mode: Only track Wang/ and share/ directories
+# =============================================================================
+
+# Ignore everything at root level
+/*
+
+# But allow these directories (whitelist)
+!Wang/
+!share/
+
+# Also keep essential git files
+!.gitignore
+!README.md
+!LICENSE
+
+# =============================================================================
+# Python (applies globally)
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# =============================================================================
+# IDE and Editor
+# =============================================================================
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# System files
+# =============================================================================
+.DS_Store
+Thumbs.db
+*.log
