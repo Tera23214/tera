@@ -1,92 +1,107 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+このファイルは、Claude Code (claude.ai/code) がこのリポジトリで作業する際のガイドラインを提供します。
 
 ---
 
-## 必须遵守的规则
+## 必ず守るルール
 
-### 语言规范
-- **沟通语言**：中文
-- **代码/注释/commit**：英文
+### 言語規範
+- **コミュニケーション言語**：日本語
+- **コード/コメント/commit**：英語
 
-### Wang/ 程序规范（重要）
-1. **程序独立性**：每个程序完整独立，不使用共享模块导入
-2. **代码一致性**：不同程序中相同代码块必须**完全一致**（复制粘贴级别）
-3. **文档语言**：Wang/README.md 用日语，技术术语用英语
+### Wang/ プログラム規範（重要）
+1. **プログラムの独立性**：各プログラムは完全に独立し、共有モジュールをインポートしない
+2. **コードの一致性**：異なるプログラム間で同じコードブロックは**完全に一致**させる（コピペレベル）
+3. **ドキュメント言語**：Wang/README.md は日本語、技術用語は英語
 
-### SMF 文档同步规则（重要）
-- **更新 smf/ 模块时，必须同步更新 `smf_docs/` 中对应的文档**
-- 新功能不明白时，先查阅 `smf_docs/README.md`
+### SMF ドキュメント同期ルール（重要）
+- **smf/ モジュールを更新する際は、必ず `smf_docs/` の対応するドキュメントも同期更新する**
+- 新機能がわからない時は、まず `smf_docs/README.md` を参照
 
 ---
 
-## 常用命令
+## よく使うコマンド
 
 ```bash
-# 安装 SMF 框架（开发模式）
+# SMF フレームワークのインストール（開発モード）
 pip install -e .
 
-# 测试
-pytest tests/                           # 运行所有测试
-pytest tests/test_file.py -v            # 运行单个测试，详细输出
+# テスト
+pytest tests/                           # 全テスト実行
+pytest tests/test_file.py -v            # 単一テスト、詳細出力
 
 # SMF CLI
-smf                # 交互模式（自然语言配置）
-smf run            # 实验向导
-smf run --bg       # 后台运行
-smf resume         # 检查点恢复
-smf log            # 查看日志
-smf log -f         # 实时跟踪日志
-smf vis            # 结果浏览器
-smf test           # 快速测试
+smf                # 対話モード（自然言語設定）
+smf run            # 実験ウィザード
+smf run --bg       # バックグラウンド実行
+smf resume         # チェックポイント復元
+smf log            # ログ表示
+smf log -f         # リアルタイムログ追跡
+smf vis            # 結果ブラウザ
+smf test           # クイックテスト
 
-# 生产训练 (Wang/) - 独立程序，不依赖 smf
-python Wang/bigamp/train.py           # BiG-AMP（推荐）
-python Wang/agd/train_parallel.py     # AGD 并行版
+# 本番トレーニング (Wang/) - 独立プログラム、smf に依存しない
+python Wang/bigamp/train.py           # BiG-AMP（推奨）
+python Wang/agd/train_parallel.py     # AGD 並列版
+
+# terao_gd/ シミュレーション
+python terao_gd/gd.py                 # 基本AGD
+python terao_gd/gd_noisy.py           # ノイズ付きAGD
+python terao_gd/gd_order_params.py    # オーダーパラメータ解析
 ```
 
 ---
 
-## 项目架构
+## プロジェクト構成
 
-### 双轨系统
+### デュアルトラックシステム
 
-| 目录 | Git | 用途 |
-|------|-----|------|
-| `Wang/` | main 分支 | 生产代码，与日本同学共享 |
-| `smf/` | dev 分支 | 模块化框架，本地开发 |
-| `smf_docs/` | dev 分支 | SMF 模块文档 |
-| `_legacy/` | - | 归档的旧代码 |
+| ディレクトリ | Git | 用途 |
+|-------------|-----|------|
+| `Wang/` | main ブランチ | 本番コード、日本の同僚と共有 |
+| `smf/` | dev ブランチ | モジュール化フレームワーク、ローカル開発 |
+| `smf_docs/` | dev ブランチ | SMF モジュールドキュメント |
+| `terao_gd/` | - | 寺尾さん用 勾配降下法実験 |
+| `_legacy/` | - | アーカイブ済み旧コード |
 
-### Wang/ 目录
+### Wang/ ディレクトリ
 ```
 Wang/
-├── bigamp/              # BiG-AMP 算法（推荐）
-│   ├── train.py         # 标准训练
-│   ├── compare_sizes.py # 尺寸对比实验
+├── bigamp/              # BiG-AMP アルゴリズム（推奨）
+│   ├── train.py         # 標準トレーニング
+│   ├── compare_sizes.py # サイズ比較実験
 │   ├── orthogonal_teacher.py
 │   ├── low_loop_graph.py
 │   └── replica_overlap.py
-├── agd/                 # 交替梯度下降
+├── agd/                 # 交互勾配降下法
 │   ├── train_parallel.py
 │   └── train_sequential.py
-├── analysis/            # 分析工具
-└── results/             # 实验结果
+├── analysis/            # 分析ツール
+└── results/             # 実験結果
 ```
 
-### smf/ 框架
+### terao_gd/ ディレクトリ
+```
+terao_gd/
+├── gd.py                # 基本AGD（Q_Y vs α プロット）
+├── gd_noisy.py          # ノイズ付き観測
+├── gd_order_params.py   # オーダーパラメータ解析
+└── gd_varying_M.py      # ランクM変化実験
+```
+
+### smf/ フレームワーク
 ```
 smf/
-├── cli.py              # 命令行入口
-├── core/               # 核心功能
-│   ├── config.py       # 配置系统
-│   ├── device.py       # GPU/CPU 检测
-│   ├── experiment.py   # 实验运行器
-│   ├── checkpoint.py   # 检查点
-│   ├── llm_advisor.py  # 自然语言配置
-│   └── progress.py     # 进度显示
-└── modules/            # 可插拔模块
+├── cli.py              # コマンドラインエントリ
+├── core/               # コア機能
+│   ├── config.py       # 設定システム
+│   ├── device.py       # GPU/CPU 検出
+│   ├── experiment.py   # 実験ランナー
+│   ├── checkpoint.py   # チェックポイント
+│   ├── llm_advisor.py  # 自然言語設定
+│   └── progress.py     # 進捗表示
+└── modules/            # プラグイン可能モジュール
     ├── algorithms/     # bigamp, agd
     ├── graphs/         # random, dinic, low_loop
     ├── teachers/       # standard, orthogonal
@@ -98,85 +113,85 @@ smf/
 
 ## 研究背景
 
-### 问题定义
-Teacher-Student 掩码矩阵分解：给定部分观测 `Y_obs = mask(W₀ × X₀)`，恢复 `W, X` 使得 `Y ≈ Y₀`
+### 問題定義
+Teacher-Student マスク行列分解：部分観測 `Y_obs = mask(W₀ × X₀)` が与えられたとき、`Y ≈ Y₀` となるような `W, X` を復元する
 
-### 核心研究：相变现象
-- **观测密度** `α̃ = (观测数) / (N₁ × N₂)`
-- 当 `α̃ > α̃_c` 时，重建质量 Q_Y 急剧接近 1
-- 临界值 `α̃_c` 依赖于矩阵维度比例
+### コア研究：相転移現象
+- **観測密度** `α̃ = (観測数) / (N₁ × N₂)`
+- `α̃ > α̃_c` のとき、再構成品質 Q_Y が急激に 1 に近づく
+- 臨界値 `α̃_c` は行列次元比率に依存
 
-### 算法选择
-| 算法 | 收敛 | 适用 |
-|------|------|------|
-| **BiG-AMP** | 200-5000 步 | 大矩阵 (N≥500)，推荐 |
-| **AGD** | ~20k epochs | 调试，小矩阵 |
-
----
-
-## 核心指标
-
-| 指标 | 范围 | 含义 |
-|------|------|------|
-| `Q_Y` | [0, 1] | 重建质量（旋转不变） |
-| `Q_Y_unobserved` | [0, 1] | 未观测位置重合度（泛化） |
-| `Q_W`, `Q_X` | [-1, 1] | 因子余弦相似度 |
+### アルゴリズム選択
+| アルゴリズム | 収束 | 適用 |
+|-------------|------|------|
+| **BiG-AMP** | 200-5000 ステップ | 大行列 (N≥500)、推奨 |
+| **AGD** | ~20k エポック | デバッグ、小行列 |
 
 ---
 
-## 关键配置参数
+## コア指標
+
+| 指標 | 範囲 | 意味 |
+|------|------|------|
+| `Q_Y` | [0, 1] | 再構成品質（回転不変） |
+| `Q_Y_unobserved` | [0, 1] | 未観測位置の一致度（汎化） |
+| `Q_W`, `Q_X` | [-1, 1] | 因子コサイン類似度 |
+
+---
+
+## 重要な設定パラメータ
 
 ```python
-# 矩阵维度
-N1, N2, M = 200, 200, 50        # 行数, 列数, 秩
+# 行列次元
+N1, N2, M = 200, 200, 50        # 行数, 列数, ランク
 
-# Alpha 扫描
+# Alpha スキャン
 ALPHA_TILDE_START = 0.0
 ALPHA_TILDE_STOP = 4.0
 ALPHA_TILDE_STEP = 0.1
 
 # BiG-AMP
-MAX_STEPS = 1000                # 迭代数
-DAMPING = 0.5                   # 阻尼因子
+MAX_STEPS = 1000                # イテレーション数
+DAMPING = 0.5                   # ダンピング係数
 
-# 图结构
-USE_BIREGULAR_GRAPH = False    # True=Dinic图, False=随机图
+# グラフ構造
+USE_BIREGULAR_GRAPH = False    # True=Dinicグラフ, False=ランダムグラフ
 ```
 
 ---
 
-## Git 分支
+## Git ブランチ
 
-| 分支 | 用途 |
-|------|------|
-| `main` | 生产代码，推送到远程 |
-| `dev` | 本地开发，包含 smf/ |
+| ブランチ | 用途 |
+|---------|------|
+| `main` | 本番コード、リモートにプッシュ |
+| `dev` | ローカル開発、smf/ を含む |
 
 ```bash
-git checkout main             # 切换到生产分支
-git checkout dev              # 切换到开发分支
-git push origin main dev      # 推送两个分支
+git checkout main             # 本番ブランチに切り替え
+git checkout dev              # 開発ブランチに切り替え
+git push origin main dev      # 両ブランチをプッシュ
 ```
 
-**远程仓库**: `https://github.com/Sulocus/Sparse-Matrix-Factorization.git`
+**リモートリポジトリ**: `https://github.com/Sulocus/Sparse-Matrix-Factorization.git`
 
 ---
 
-## 跨会话任务接力
+## セッション間タスク引き継ぎ
 
-| 命令 | 用途 |
-|------|------|
-| `/pass` | 结束对话前，保存任务状态到 HANDOVER.md |
-| `/rem` | 新对话开始时，恢复上下文 |
+| コマンド | 用途 |
+|---------|------|
+| `/pass` | 会話終了前にタスク状態を HANDOVER.md に保存 |
+| `/rem` | 新しい会話開始時にコンテキストを復元 |
 
 ---
 
-## 依赖
+## 依存関係
 
 ```bash
-# 核心依赖
+# コア依存
 pip install torch numpy scipy matplotlib rich tqdm pyyaml
 
-# GPU 加速 (CUDA 12.1)
+# GPU アクセラレーション (CUDA 12.1)
 pip install torch --index-url https://download.pytorch.org/whl/cu121
 ```
