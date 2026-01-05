@@ -119,6 +119,18 @@ smf/
 
 ---
 
+## 参考論文
+
+本研究は以下の論文に基づいています：
+
+**Graphical model for tensor factorization by sparse sampling**
+- arXiv: https://arxiv.org/abs/2510.17886
+- 概要: ランダムグラフ上でのスパースサンプリングによるテンソル分解
+- 手法: メッセージパッシングアルゴリズム、レプリカ理論
+- 設定: Teacher-Student、ベイズ最適設定、dense limit での解析
+
+---
+
 ## 研究背景
 
 ### 問題定義
