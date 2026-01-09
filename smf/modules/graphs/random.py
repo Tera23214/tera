@@ -1,9 +1,15 @@
 """
-Random graph generation (GPU-based).
+Biregular graph generation (GPU-based).
+
+Generates bipartite graphs where each left node has exactly C1 edges
+and attempts to balance right node degrees towards C2.
+
+Satisfies Dense Limit requirements from arXiv:2510.17886.
 """
 
 from typing import Tuple
 import torch
+import numpy as np
 
 from ..registry import register_graph
 from .base import GraphBase
@@ -11,18 +17,20 @@ from .base import GraphBase
 
 @register_graph(
     key="random",
-    name="Random Graph (GPU)",
-    description="Pure random sampling, fast, supports any N1≠N2",
+    name="Biregular Graph (GPU)",
+    description="Biregular sampling, each row has exactly C1=alpha*M edges",
 )
 class RandomGraph(GraphBase):
     """
-    Pure random mask generation (entirely on GPU).
+    Biregular bipartite graph generator.
 
     Approach:
-    1. Map all positions of N1×N2 matrix to 1D index [0, N1*N2-1]
-    2. Use torch.randperm to randomly shuffle all positions on GPU
-    3. Take first C positions as observation points
-    4. Restore 1D index to (i,j) coordinates
+    1. Each row i gets exactly C1 = alpha * M unique column indices
+    2. Columns are sampled randomly for each row
+    3. Total edges E = N1 * C1
+    
+    This ensures each W-node (row) has exactly C1 edges.
+    Column degrees will vary around the expected C2 = (N1*C1)/N2.
     """
 
     def generate(
@@ -34,33 +42,53 @@ class RandomGraph(GraphBase):
         device: torch.device,
         seed: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        """Generate random edge indices."""
-        # Calculate degree and total edges
-        deg_left = int(round(alpha * M))
-        deg_left = max(0, min(deg_left, N2))
-        C = N1 * deg_left
-
-        if seed is not None:
-            torch.manual_seed(seed)
-
-        total = N1 * N2
-        if C > total:
-            raise RuntimeError(
-                f"Requested edge count C={C} exceeds matrix total size {N1}×{N2}={total}"
-            )
-
-        if C == 0:
+        """
+        Generate biregular edge indices.
+        
+        Each row has exactly C1 = alpha * M edges.
+        
+        Args:
+            N1: Number of rows
+            N2: Number of columns
+            M: Rank
+            alpha: Degree parameter (C1 = alpha * M)
+            device: torch device
+            seed: Random seed
+            
+        Returns:
+            i_idx: Row indices
+            j_idx: Column indices
+            E: Total number of edges
+        """
+        # Calculate degree per row
+        C1 = int(round(alpha * M))
+        C1 = max(1, min(C1, N2))  # Clamp to valid range
+        
+        E = N1 * C1
+        
+        if E == 0:
             return (
                 torch.empty(0, dtype=torch.long, device=device),
                 torch.empty(0, dtype=torch.long, device=device),
                 0,
             )
-
-        # Randomly shuffle all position indices on GPU
-        idx = torch.randperm(total, device=device)[:C]
-
-        # Restore 1D index to 2D coordinates
-        i_idx = idx // N2  # Row index
-        j_idx = idx % N2   # Column index
-
-        return i_idx, j_idx, C
+        
+        if seed is not None:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+        
+        # Generate edges: each row gets exactly C1 unique columns
+        i_list = []
+        j_list = []
+        
+        for i in range(N1):
+            # Sample C1 unique columns for this row
+            cols = np.random.choice(N2, size=C1, replace=False)
+            for j in cols:
+                i_list.append(i)
+                j_list.append(j)
+        
+        i_idx = torch.tensor(i_list, dtype=torch.long, device=device)
+        j_idx = torch.tensor(j_list, dtype=torch.long, device=device)
+        
+        return i_idx, j_idx, E

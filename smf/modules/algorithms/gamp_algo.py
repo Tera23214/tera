@@ -981,7 +981,7 @@ class BiGAMPSpreadingParallel(AlgorithmBase):
             F_super=F_super,
             Y_super=Y_super,
             M=M,
-            alpha_values=torch.tensor(alpha_values, device=self.device),
+            alpha_values=torch.tensor(alpha_values, device=self.device, dtype=torch.float32),
             W_teacher=W_teacher,
             X_teacher=X_teacher,
         )

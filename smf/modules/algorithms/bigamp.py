@@ -3,7 +3,7 @@ BiG-AMP (Bilinear Generalized Approximate Message Passing) algorithm.
 
 Supports torch.compile for kernel fusion acceleration (~2-3x speedup).
 """
-
+#%%
 from typing import Tuple, Optional, Callable
 import torch
 
@@ -225,9 +225,21 @@ class BiGAMPAlgorithm(AlgorithmBase):
         masks: torch.Tensor,
         alpha_values: list[float],
         seed: int,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        step_callback: Optional[Callable[[int, int], None]] = None,
+        sample_callback: Optional[Callable[[int, int, list], None]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Train BiG-AMP for multiple alphas in parallel."""
+        """Train BiG-AMP for multiple alphas in parallel.
+        
+        Args:
+            W_teacher, X_teacher, Y_teacher: Teacher tensors
+            masks: (num_alphas, N1, N2) observation masks
+            alpha_values: List of alpha values
+            seed: Random seed
+            step_callback: Optional callback(step, max_steps) for step progress
+            sample_callback: Optional callback(batch_idx, num_batches, batch_alphas) for batch progress
+        """
+        from ..graphs.random import RandomGraph
+        
         N1, M = W_teacher.shape
         N2 = X_teacher.shape[1]
         S = self.S
@@ -236,6 +248,18 @@ class BiGAMPAlgorithm(AlgorithmBase):
 
         alpha_scale = 1.0 / (M ** 0.5)
         scale = 1.0 / (M ** 0.5)
+
+        # Generate masks if not provided (masks=None from runner)
+        if masks is None:
+            graph = RandomGraph()
+            masks = torch.zeros((num_alphas, N1, N2), device=device)
+            for i, alpha in enumerate(alpha_values):
+                mask_seed = seed + int(alpha * 1000)
+                masks[i], _ = graph.generate_mask(N1, N2, M, alpha, device, mask_seed)
+        
+        # Notify batch start (single batch for standard bigamp)
+        if sample_callback:
+            sample_callback(0, 1, alpha_values)
 
         # masks: (num_alphas, N1, N2) -> (num_alphas, 1, N1, N2)
         A_all = masks.unsqueeze(1)
@@ -261,8 +285,8 @@ class BiGAMPAlgorithm(AlgorithmBase):
             )
 
             # Report progress
-            if progress_callback:
-                progress_callback(step + 1, self.max_steps)
+            if step_callback:
+                step_callback(step + 1, self.max_steps)
 
         return w_hat, x_hat
 

@@ -21,7 +21,7 @@ import math
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from smf.modules.graphs.random import RandomGraph
+from .graph import BiregularGraph
 from .utils import normalize_to_unit_variance, compute_qy
 
 
@@ -231,11 +231,11 @@ def train_single_replica(
     W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
     X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
     
-    # Generate observation graph
-    graph = RandomGraph()
-    i_idx, j_idx, C = graph.generate(N1, N2, M, alpha, device, seed)
+    # Generate observation graph (biregular)
+    graph = BiregularGraph()
+    i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(N1, N2, M, alpha, device, seed)
     
-    if C == 0:
+    if E == 0:
         return 0.0, 0.0, 0
     
     # Generate observed values
@@ -249,7 +249,7 @@ def train_single_replica(
     v_W = torch.ones(N1, M, device=device)
     m_X = torch.randn(M, N2, device=device) * 0.01
     v_X = torch.ones(M, N2, device=device)
-    g_prev = torch.zeros(C, device=device)
+    g_prev = torch.zeros(E, device=device)
     
     # G-AMP iterations
     final_loss = 0.0
