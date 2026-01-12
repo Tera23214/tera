@@ -15,16 +15,18 @@ both student-teacher overlaps and student-student overlaps.
 import sys
 import math
 import time
+from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 
 # Add parent directory to path (to get smf modules)
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from smf.modules.graphs.random import RandomGraph
+from terao_gamp.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -385,6 +387,36 @@ if __name__ == "__main__":
     print(f"Students per replica: {NUM_STUDENTS}")
     print()
     
+    # Create results directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir_name = f"{timestamp}_agd_order_params_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
+    results_dir = Path(__file__).parent / "results" / results_dir_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results directory: {results_dir}")
+    
+    # Save configuration
+    config = {
+        'algorithm': 'agd_order_params',
+        'N1': N1,
+        'N2': N2,
+        'M': M,
+        'alpha_start': ALPHA_START,
+        'alpha_stop': ALPHA_STOP,
+        'alpha_step': ALPHA_STEP,
+        'max_steps': MAX_STEPS,
+        'lr': LR,
+        'lr_base': LR_BASE,
+        'seed': SEED,
+        'num_replicas': NUM_REPLICAS,
+        'num_students': NUM_STUDENTS,
+        'convergence_threshold': CONVERGENCE_THRESHOLD,
+        'device': str(device),
+    }
+    config_path = results_dir / "config.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Config saved: {config_path}")
+    
     # Run simulations
     alphas = np.arange(ALPHA_START, ALPHA_STOP + ALPHA_STEP/2, ALPHA_STEP)
     results = {}
@@ -457,9 +489,9 @@ if __name__ == "__main__":
     
     alphas_list = sorted(results.keys())
     
-    # Create output directory
-    output_dir = Path(__file__).parent / "gd_result"
-    output_dir.mkdir(exist_ok=True)
+    # Create plots subdirectory
+    plots_dir = results_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
     
     plot_params = [
         ('m_W', r'$m_W$', 'Student-Teacher W Overlap', '#1E88E5'),
@@ -494,9 +526,9 @@ if __name__ == "__main__":
         
         plt.tight_layout()
         
-        output_path = output_dir / f"{param_name}_{base_name}.png"
+        output_path = plots_dir / f"{param_name}.png"
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"Plot saved to: {output_path}")
+        print(f"Plot saved: {output_path}")
         plt.close(fig)
     
     # Also save a combined plot
@@ -524,13 +556,13 @@ if __name__ == "__main__":
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     
-    combined_path = output_dir / f"all_params_{base_name}.png"
+    combined_path = plots_dir / "all_params.png"
     plt.savefig(combined_path, dpi=150, bbox_inches='tight')
-    print(f"Combined plot saved to: {combined_path}")
+    print(f"Combined plot saved: {combined_path}")
     plt.close(fig)
     
     # Save results to CSV
-    csv_path = output_dir / f"order_params_{base_name}.csv"
+    csv_path = results_dir / "metrics.csv"
     with open(csv_path, 'w') as f:
         # Header
         header = "alpha"
@@ -548,7 +580,8 @@ if __name__ == "__main__":
             line += f",{r['loss_mean']},{r['loss_std']},{r['steps_mean']}"
             f.write(line + "\n")
     
-    print(f"CSV saved to: {csv_path}")
+    print(f"Metrics saved: {csv_path}")
+    print(f"\nResults saved to: {results_dir}")
     
     print("Done!")
 

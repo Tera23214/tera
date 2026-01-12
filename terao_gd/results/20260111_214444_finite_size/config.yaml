@@ -1,0 +1,12 @@
+M_formula: N * 0.01
+N_values:
+- 100
+- 300
+- 1000
+alpha_start: 1.0
+alpha_step: 0.5
+alpha_stop: 4.0
+device: mps
+lr_base: 0.01
+max_steps: 3000
+num_replicas: 3

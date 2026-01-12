@@ -18,16 +18,18 @@ Supports multiple replicas for statistical averaging (GPU accelerated).
 import sys
 import math
 import time
+from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 
 # Add parent directory to path(to get smf modules)
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from smf.modules.graphs.random import RandomGraph
+from terao_gamp.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -259,6 +261,35 @@ if __name__ == "__main__":
     print(f"Replicas per alpha: {NUM_REPLICAS}")
     print()
     
+    # Create results directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir_name = f"{timestamp}_agd_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
+    results_dir = Path(__file__).parent / "results" / results_dir_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results directory: {results_dir}")
+    
+    # Save configuration
+    config = {
+        'algorithm': 'agd',
+        'N1': N1,
+        'N2': N2,
+        'M': M,
+        'alpha_start': ALPHA_START,
+        'alpha_stop': ALPHA_STOP,
+        'alpha_step': ALPHA_STEP,
+        'max_steps': MAX_STEPS,
+        'lr': LR,
+        'lr_base': LR_BASE,
+        'seed': SEED,
+        'num_replicas': NUM_REPLICAS,
+        'convergence_threshold': CONVERGENCE_THRESHOLD,
+        'device': str(device),
+    }
+    config_path = results_dir / "config.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Config saved: {config_path}")
+    
     # Run simulations
     alphas = np.arange(ALPHA_START, ALPHA_STOP + ALPHA_STEP/2, ALPHA_STEP)
     results = {}
@@ -332,17 +363,18 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     
-    # Save with parameters in filename
-    sample_size = len(alphas_list)
-    base_name = f"qy_vs_alpha_agd_N1{N1}_N2{N2}_M{M}_samples{sample_size}_replicas{NUM_REPLICAS}"
+    # Create plots subdirectory
+    plots_dir = results_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
     
-    output_path = Path(__file__).parent / f"{base_name}.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Plot saved to: {output_path}")
+    # Save plot
+    plot_path = plots_dir / "qy_vs_alpha.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"Plot saved: {plot_path}")
     plt.show()
     
     # Save results to CSV
-    csv_path = Path(__file__).parent / f"{base_name}.csv"
+    csv_path = results_dir / "metrics.csv"
     with open(csv_path, 'w') as f:
         # Header
         header = "alpha,Q_Y_mean,Q_Y_std,Loss_mean,Loss_std,Steps_mean"
@@ -358,7 +390,8 @@ if __name__ == "__main__":
                 line += f",{qy_v},{loss_v}"
             f.write(line + "\n")
     
-    print(f"CSV saved to: {csv_path}")
+    print(f"Metrics saved: {csv_path}")
+    print(f"\nResults saved to: {results_dir}")
     
     print("Done!")
 

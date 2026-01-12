@@ -24,16 +24,18 @@ Optimization: Alternating updates of W and X using gradient descent.
 import sys
 import math
 import time
+from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 
 # Add parent directory to path (to get smf modules)
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from smf.modules.graphs.random import RandomGraph
+from terao_gamp.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -43,7 +45,7 @@ N1 = 1000   # Number of rows
 N2 = 1000   # Number of columns  
 
 # Fixed alpha
-ALPHA = 3.0  # Observation density (fixed)
+ALPHA = 1.0  # Observation density (fixed)
 
 # Rank M sweep
 M_START = 5
@@ -242,6 +244,34 @@ if __name__ == "__main__":
     print(f"Replicas per M: {NUM_REPLICAS}")
     print()
     
+    # Create results directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir_name = f"{timestamp}_agd_varying_M_{N1}_alpha{ALPHA}"
+    results_dir = Path(__file__).parent / "results" / results_dir_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results directory: {results_dir}")
+    
+    # Save configuration
+    config = {
+        'algorithm': 'agd_varying_M',
+        'N1': N1,
+        'N2': N2,
+        'alpha': ALPHA,
+        'm_start': M_START,
+        'm_stop': M_STOP,
+        'm_step': M_STEP,
+        'max_steps': MAX_STEPS,
+        'lr_base': LR_BASE,
+        'seed': SEED,
+        'num_replicas': NUM_REPLICAS,
+        'convergence_threshold': CONVERGENCE_THRESHOLD,
+        'device': str(device),
+    }
+    config_path = results_dir / "config.yaml"
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Config saved: {config_path}")
+    
     # Run simulations
     M_values = list(range(M_START, M_STOP + 1, M_STEP))
     results = {}
@@ -337,17 +367,18 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     
-    # Save with parameters in filename
-    sample_size = len(M_list)
-    base_name = f"qy_vs_M_agd_N1{N1}_N2{N2}_alpha{ALPHA}_samples{sample_size}_replicas{NUM_REPLICAS}"
+    # Create plots subdirectory
+    plots_dir = results_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
     
-    output_path = Path(__file__).parent / f"{base_name}.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Plot saved to: {output_path}")
+    # Save plot
+    plot_path = plots_dir / "qy_vs_M.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"Plot saved: {plot_path}")
     plt.show()
     
     # Save results to CSV
-    csv_path = Path(__file__).parent / f"{base_name}.csv"
+    csv_path = results_dir / "metrics.csv"
     with open(csv_path, 'w') as f:
         header = "M,C_mean,Q_Y_mean,Q_Y_std,Loss_mean,Loss_std,Steps_mean"
         for i in range(NUM_REPLICAS):
@@ -361,7 +392,8 @@ if __name__ == "__main__":
                 line += f",{qy_v},{loss_v},{c_v}"
             f.write(line + "\n")
     
-    print(f"CSV saved to: {csv_path}")
+    print(f"Metrics saved: {csv_path}")
+    print(f"\nResults saved to: {results_dir}")
     
     print("Done!")
 
