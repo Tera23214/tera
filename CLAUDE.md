@@ -29,36 +29,6 @@
 
 ---
 
-## よく使うコマンド
-
-```bash
-# SMF フレームワークのインストール（開発モード）
-pip install -e .
-
-# テスト
-pytest tests/                           # 全テスト実行
-pytest tests/test_file.py -v            # 単一テスト、詳細出力
-
-# SMF CLI
-smf                # 対話モード（自然言語設定）
-smf run            # 実験ウィザード
-smf run --bg       # バックグラウンド実行
-smf resume         # チェックポイント復元
-smf log            # ログ表示
-smf log -f         # リアルタイムログ追跡
-smf vis            # 結果ブラウザ
-smf test           # クイックテスト
-
-# 本番トレーニング (Wang/) - 独立プログラム、smf に依存しない
-python Wang/bigamp/train.py           # BiG-AMP（推奨）
-python Wang/agd/train_parallel.py     # AGD 並列版
-
-# terao_gd/ シミュレーション
-python terao_gd/gd.py                 # 基本AGD
-python terao_gd/gd_noisy.py           # ノイズ付きAGD
-python terao_gd/gd_order_params.py    # オーダーパラメータ解析
-```
-
 ---
 
 ## プロジェクト構成
@@ -66,11 +36,9 @@ python terao_gd/gd_order_params.py    # オーダーパラメータ解析
 ### デュアルトラックシステム
 
 | ディレクトリ | Git | 用途 |
-|-------------|-----|------|
-| `Wang/` | main ブランチ | 本番コード、日本の同僚と共有 |
 | `smf/` | dev ブランチ | モジュール化フレームワーク、ローカル開発 |
 | `smf_docs/` | dev ブランチ | SMF モジュールドキュメント |
-| `terao_gd/` | - | 寺尾さん用 勾配降下法実験 |
+| `terao_gd/` | - | 勾配降下法実験 |
 | `_legacy/` | - | アーカイブ済み旧コード |
 
 ### Wang/ ディレクトリ

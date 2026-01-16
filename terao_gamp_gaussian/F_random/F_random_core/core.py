@@ -1,15 +1,14 @@
 #!/usr/bin/env python
 """
-G-AMP (Generalized Approximate Message Passing) Core Module.
+G-AMP (Generalized Approximate Message Passing) Core Module with Random F.
 
 Implements the G-AMP algorithm for sparse matrix factorization
-based on arXiv:2510.17886 Algorithm 2.
+with F ~ N(0,1) instead of F=1.
 
-Key functions:
-- f_input: Input denoiser (Gaussian prior)
-- g_out: Output function (Gaussian noise)
-- gamp_step: Single G-AMP iteration
-- train_single_replica: Train one replica for given alpha
+Observation model:
+    Y_obs = (1/√M) Σ_μ F[c,μ] W_{i_c,μ} X_{μ,j_c} + ΔZ
+
+where F[c,μ] ~ N(0,1) i.i.d. for each observed edge c.
 """
 
 import sys
@@ -17,40 +16,31 @@ from pathlib import Path
 import torch
 import math
 
-# Add parent directory to path
-repo_root = Path(__file__).resolve().parent.parent
+# Add parent directories to path
+repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from .graph import BiregularGraph
-from .utils import normalize_to_unit_variance, compute_qy
+from terao_gamp_gaussian.graph import BiregularGraph
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy
 
 
 # ============================================================================
-# G-AMP Functions (Algorithm 2)
+# G-AMP Functions with Random F
 # ============================================================================
 
 def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Input function for Gaussian prior (Alg2.4).
+    Input function for Gaussian prior (Eq. 178 in paper).
     
     For standard Gaussian prior N(0, 1):
-        m = T / (1 + Sigma)
-        v = Sigma / (1 + Sigma)
-    
-    Args:
-        Sigma: Inverse variance parameter
-        T: Mean parameter (scaled)
-    
-    Returns:
-        m: Posterior mean
-        v: Posterior variance
+        f_input(Σ, T) = T / (Σ + 1)
+        f_input,II(Σ, T) = Σ / (Σ + 1) + T² / (Σ + 1)²
     """
-    # Avoid division by zero
     denom = 1.0 + Sigma
     denom = torch.clamp(denom, min=1e-10)
     
     m = T / denom
-    v = Sigma / denom
+    v = Sigma / denom + (T ** 2) / (denom ** 2)
     
     return m, v
 
@@ -62,21 +52,10 @@ def g_out(
     noise_var: float = 1e-10,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Output function for Gaussian noise channel (Alg2.2).
+    Output function for Gaussian noise channel.
     
-    For additive Gaussian noise with variance sigma^2:
-        g = (y - omega) / (V + sigma^2)
-        dg/d_omega = -1 / (V + sigma^2)
-    
-    Args:
-        omega: Current prediction
-        y: Observed value
-        V: Variance estimate
-        noise_var: Noise variance (sigma^2)
-    
-    Returns:
-        g: Output function value
-        dg: Derivative of g w.r.t. omega
+    g = (y - omega) / (V + sigma^2)
+    dg/d_omega = -1 / (V + sigma^2)
     """
     denom = V + noise_var
     denom = torch.clamp(denom, min=1e-10)
@@ -87,16 +66,18 @@ def g_out(
     return g, dg
 
 
-def gamp_step(
+@torch.compile(mode="reduce-overhead")
+def gamp_step_with_F(
     m_W: torch.Tensor,      # (N1, M) - W messages (mean)
-    v_W: torch.Tensor,      # (N1, M) - W messages (variance)
+    v_W: torch.Tensor,      # (N1, M) - W messages (second moment)
     m_X: torch.Tensor,      # (M, N2) - X messages (mean)
-    v_X: torch.Tensor,      # (M, N2) - X messages (variance)
+    v_X: torch.Tensor,      # (M, N2) - X messages (second moment)
     Y: torch.Tensor,        # (C,) - Observed values
+    F: torch.Tensor,        # (C, M) - Random F factors per edge
+    F_sq: torch.Tensor,     # (C, M) - Pre-computed F**2 for efficiency
     i_idx: torch.Tensor,    # (C,) - Row indices
     j_idx: torch.Tensor,    # (C,) - Column indices
     g_prev: torch.Tensor,   # (C,) - Previous g values
-    lam: float,             # Lambda = sqrt(alpha * M)
     noise_var: float,       # Noise variance
     damping: float,         # Damping factor
     N1: int,
@@ -104,87 +85,82 @@ def gamp_step(
     M: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Single G-AMP step (Algorithm 2).
+    Single G-AMP step with random F ~ N(0,1) per edge.
     
-    Updates messages for W and X based on observed values Y.
+    The observation model is:
+        Y_c = (1/√M) Σ_μ F[c,μ] W_{i_c,μ} X_{μ,j_c}
     
-    Returns:
-        m_W_new, v_W_new, m_X_new, v_X_new, g_new
+    F is now (C, M) - different for each observation.
     """
     C = Y.shape[0]
     device = Y.device
     
-    # Scale factor
-    scale = lam / math.sqrt(M)
+    scale = 1.0 / math.sqrt(M)
+    scale_sq = 1.0 / M
     
     # ========================================================================
-    # Step 3: Update omega and V (Alg2.1)
+    # Step 1: Compute omega and V with F
     # ========================================================================
-    
-    # Compute predictions at observed locations
-    # omega_c = sum_mu (lambda/sqrt(M)) * prod_j m_W[i,mu] * prod_k m_X[mu,j]
-    # Simplified: omega_c = W[i_c, :] @ X[:, j_c]
     
     W_sel = m_W[i_idx.long(), :]      # (C, M)
     X_sel = m_X[:, j_idx.long()].T    # (C, M)
     
-    # Predicted values
-    omega = (W_sel * X_sel).sum(dim=1)  # (C,)
+    # ω = (1/√M) Σ_μ F[c,μ] m_W × m_X
+    omega = scale * (F * W_sel * X_sel).sum(dim=1)  # (C,)
     
-    # Variance at observed locations
-    vW_sel = v_W[i_idx.long(), :]     # (C, M)
-    vX_sel = v_X[:, j_idx.long()].T   # (C, M)
+    # V = (1/M) Σ_μ F[c,μ]² (v_W × v_X - m_W² × m_X²)
+    vW_sel = v_W[i_idx.long(), :]
+    vX_sel = v_X[:, j_idx.long()].T
+    # F_sq is now passed as pre-computed parameter
     
-    # V = sum_mu (var_W * m_X^2 + m_W^2 * var_X + var_W * var_X)
-    V = (vW_sel * (X_sel ** 2) + (W_sel ** 2) * vX_sel + vW_sel * vX_sel).sum(dim=1)  # (C,)
+    V = scale_sq * (F_sq * (vW_sel * vX_sel - (W_sel ** 2) * (X_sel ** 2))).sum(dim=1)
+    V = torch.clamp(V, min=1e-10)  # Ensure positive
     
     # ========================================================================
-    # Step 4: Output function (Alg2.2)
+    # Step 2: Output function
     # ========================================================================
     
-    g, dg = g_out(omega, Y, V, noise_var)  # (C,), (C,)
+    g, dg = g_out(omega, Y, V, noise_var)
     
     # Apply damping to g
     g = damping * g + (1 - damping) * g_prev
     
     # ========================================================================
-    # Step 5-6: Update Sigma, T and then m, v (Alg2.3, Alg2.4)
+    # Step 3: Update Sigma, T with F
     # ========================================================================
     
     # Update W messages
-    # Sigma_W[i,mu] = sum_{c: i_c=i} (-dg_c) * m_X[mu, j_c]^2
-    # T_W[i,mu] = m_W[i,mu] + sum_{c: i_c=i} g_c * m_X[mu, j_c]
+    # Σ_W[i,μ] = (1/M) Σ_c F[c,μ]² × (-∂g_c) × m_X[μ,j_c]²
+    # T_W[i,μ] = m_W[i,μ] + (1/√M) Σ_c F[c,μ] × g_c × m_X[μ,j_c]
     
     Sigma_W = torch.zeros_like(m_W)
     T_W = m_W.clone()
     
-    # Scatter add for efficiency
-    dg_expanded = (-dg).unsqueeze(1) * (X_sel ** 2)  # (C, M)
+    # Σ contribution: F[c,μ]² × (1/M) × (-dg) × m_X²
+    dg_expanded = scale_sq * (-dg).unsqueeze(1) * (X_sel ** 2) * F_sq  # (C, M)
     Sigma_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
     
-    g_expanded = g.unsqueeze(1) * X_sel  # (C, M)
+    # T contribution: F[c,μ] × (1/√M) × g × m_X
+    g_expanded = scale * g.unsqueeze(1) * X_sel * F  # (C, M)
     T_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
     
     # Apply f_input for W
     m_W_new, v_W_new = f_input(torch.clamp(Sigma_W, min=1e-10), T_W)
     
     # Update X messages
-    # Sigma_X[mu,j] = sum_{c: j_c=j} (-dg_c) * m_W[i_c, mu]^2
-    # T_X[mu,j] = m_X[mu,j] + sum_{c: j_c=j} g_c * m_W[i_c, mu]
-    
     Sigma_X = torch.zeros_like(m_X)
     T_X = m_X.clone()
     
-    dg_expanded_X = (-dg).unsqueeze(1) * (W_sel ** 2)  # (C, M)
+    dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2) * F_sq
     Sigma_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
     
-    g_expanded_X = g.unsqueeze(1) * W_sel  # (C, M)
+    g_expanded_X = scale * g.unsqueeze(1) * W_sel * F
     T_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
     
     # Apply f_input for X
     m_X_new, v_X_new = f_input(torch.clamp(Sigma_X, min=1e-10), T_X)
     
-    # Apply damping to messages
+    # Apply damping
     m_W_new = damping * m_W_new + (1 - damping) * m_W
     v_W_new = damping * v_W_new + (1 - damping) * v_W
     m_X_new = damping * m_X_new + (1 - damping) * m_X
@@ -206,48 +182,45 @@ def train_single_replica(
     convergence_threshold: float = 1e-6,
 ) -> tuple[float, float, int]:
     """
-    Train a single replica using G-AMP.
+    Train a single replica using G-AMP with F ~ N(0,1) for spreading.
     
-    Args:
-        alpha: Observation density
-        device: torch device
-        seed: Random seed
-        N1, N2, M: Matrix dimensions
-        max_steps: Maximum iterations
-        damping: Message damping factor
-        noise_var: Noise variance
-        convergence_threshold: Convergence threshold
+    Observation model:
+        Y_c = (1/√M) Σ_μ F[c,μ] W_{i_c,μ} X_{μ,j_c}
     
-    Returns:
-        qy: Q_Y overlap metric
-        final_loss: Final MSE loss
-        steps_taken: Number of iterations
+    where F[c,μ] ~ N(0, 1) i.i.d. for each edge c and component μ.
     """
-    # Lambda parameter
-    lam = math.sqrt(alpha * M)
-    
-    # Generate teacher matrices
-    torch.manual_seed(seed)
-    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
-    
-    # Generate observation graph (biregular)
+    # Generate observation graph (BiregularGraph for Dense Limit)
     graph = BiregularGraph()
     i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(N1, N2, M, alpha, device, seed)
     
     if E == 0:
         return 0.0, 0.0, 0
     
-    # Generate observed values
+    # Generate teacher matrices W ~ N(0,1), X ~ N(0,1)
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+    
+    # Generate spreading matrix F: (E, M) with F[c,μ] ~ N(0,1) i.i.d.
+    torch.manual_seed(seed + 500)
+    F = torch.randn(E, M, device=device, dtype=torch.float32)
+    F_sq = F ** 2  # Pre-compute for efficiency (used every step)
+    
+    # Generate observations with F: Y = (1/√M) Σ_μ F[c,μ] W X
     W_sel = W_teacher[i_idx.long(), :]
     X_sel = X_teacher[:, j_idx.long()].T
-    Y = (W_sel * X_sel).sum(dim=1)  # (C,)
+    Y = (1.0 / math.sqrt(M)) * (F * W_sel * X_sel).sum(dim=1)
     
-    # Initialize messages (small random values)
+    # Add noise
     torch.manual_seed(seed + 1000)
-    m_W = torch.randn(N1, M, device=device) * 0.01
+    noise = torch.randn_like(Y) * math.sqrt(noise_var)
+    Y_noisy = Y + noise
+    
+    # Initialize messages: m~N(0, 0.1) small to ensure V > 0, v=1.0
+    torch.manual_seed(seed + 2000)
+    m_W = torch.randn(N1, M, device=device) * 0.1  # Small init
     v_W = torch.ones(N1, M, device=device)
-    m_X = torch.randn(M, N2, device=device) * 0.01
+    m_X = torch.randn(M, N2, device=device) * 0.1  # Small init
     v_X = torch.ones(M, N2, device=device)
     g_prev = torch.zeros(E, device=device)
     
@@ -257,22 +230,21 @@ def train_single_replica(
     prev_loss = float('inf')
     
     for step in range(max_steps):
-        m_W, v_W, m_X, v_X, g_prev = gamp_step(
-            m_W, v_W, m_X, v_X, Y, i_idx, j_idx, g_prev,
-            lam, noise_var, damping, N1, N2, M
+        m_W, v_W, m_X, v_X, g_prev = gamp_step_with_F(
+            m_W, v_W, m_X, v_X,
+            Y_noisy, F, F_sq, i_idx, j_idx, g_prev,
+            noise_var, damping, N1, N2, M
         )
         
-        # Check convergence every 50 steps
+        # Check convergence
         if step % 50 == 0 or step == max_steps - 1:
-            # Compute predictions
             W_sel = m_W[i_idx.long(), :]
             X_sel = m_X[:, j_idx.long()].T
-            Y_pred = (W_sel * X_sel).sum(dim=1)
+            Y_pred = (1.0 / math.sqrt(M)) * (F * W_sel * X_sel).sum(dim=1)
             
-            loss = ((Y - Y_pred) ** 2).mean().item()
+            loss = ((Y_noisy - Y_pred) ** 2).mean().item()
             final_loss = loss
             
-            # Check for convergence
             if abs(prev_loss - loss) < convergence_threshold:
                 steps_taken = step + 1
                 break

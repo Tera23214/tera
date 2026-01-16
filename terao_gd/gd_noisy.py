@@ -37,7 +37,7 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -69,24 +69,26 @@ def compute_predictions(
     X: torch.Tensor,       # (M, N2)
     i_idx: torch.Tensor,   # (C,)
     j_idx: torch.Tensor,   # (C,)
+    M: int,                # Rank for 1/√M scaling
 ) -> torch.Tensor:
     """
     Compute predictions Y_pred for observed entries.
     
-    Y_pred[c] = W[i_c,:] @ X[:,j_c] = sum_mu W[i_c, mu] * X[mu, j_c]
+    Y_pred[c] = (1/√M) * sum_mu W[i_c, mu] * X[mu, j_c]
     """
     W_sel = W[i_idx.long(), :]       # (C, M)
     X_sel = X[:, j_idx.long()].T     # (C, M)
     
-    Y_pred = (W_sel * X_sel).sum(dim=1)  # (C,)
+    Y_pred = (W_sel * X_sel).sum(dim=1) / math.sqrt(M)  # (C,)
     return Y_pred
 
 
-def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor) -> torch.Tensor:
-    """Compute MSE loss: L = sum((Y - Y_pred)^2)"""
-    return ((Y - Y_pred) ** 2).sum()
+def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
+    """Compute MSE loss: L = M * sum((Y - Y_pred)^2)"""
+    return M * ((Y - Y_pred) ** 2).sum()
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_W(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -98,11 +100,11 @@ def agd_step_W(
     """Gradient descent step for W (fixing X)."""
     N1, M = W.shape
     
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y
     
     X_sel = X[:, j_idx.long()].T
-    grad_contrib = 2.0 * residual.unsqueeze(1) * X_sel
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * X_sel
     
     grad_W = torch.zeros_like(W)
     grad_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), grad_contrib)
@@ -111,6 +113,7 @@ def agd_step_W(
     return W_new
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_X(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -122,11 +125,11 @@ def agd_step_X(
     """Gradient descent step for X (fixing W)."""
     M, N2 = X.shape
     
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y
     
     W_sel = W[i_idx.long(), :]
-    grad_contrib = 2.0 * residual.unsqueeze(1) * W_sel
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * W_sel
     
     grad_X = torch.zeros_like(X)
     grad_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), grad_contrib.T)
@@ -178,7 +181,7 @@ def train_single_replica_noisy(
         return 0.0
     
     # Generate TRUE Y (without noise)
-    Y_true = compute_predictions(W_teacher, X_teacher, i_idx, j_idx)
+    Y_true = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
     
     # Add Gaussian noise: Y_noisy = Y_true + ε, ε ~ N(0, noise_var)
     torch.manual_seed(seed + 500)

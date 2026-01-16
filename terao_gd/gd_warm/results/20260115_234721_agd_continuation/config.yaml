@@ -1,0 +1,17 @@
+M: 20
+N1: 2000
+N2: 2000
+algorithm: agd_continuation
+alpha_max: 4.0
+alpha_min: 0.5
+alpha_steps: 19
+device: mps
+lr: 0.001
+max_steps_per_alpha: 2000
+num_replicas: 5
+sigma_init_values:
+- '0.0'
+- '0.1'
+- '0.5'
+- '1.0'
+- inf

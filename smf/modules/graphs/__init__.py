@@ -9,7 +9,7 @@ Available methods:
 """
 
 from .base import GraphBase
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 from .uniform import UniformGraph
 from .low_loop import LowLoopGraph
 from .combined import CombinedGraph

@@ -17,7 +17,7 @@ import torch
 
 from ..registry import register_graph
 from .base import GraphBase
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 from .uniform import UniformGraph as DinicGraph  # DinicGraph is alias for UniformGraph
 from .low_loop import LowLoopGraph
 

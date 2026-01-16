@@ -22,7 +22,7 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -59,6 +59,7 @@ def compute_loss(Y, Y_pred):
     return ((Y - Y_pred) ** 2).sum()
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_W(W, X, Y, i_idx, j_idx, lr):
     N1, M = W.shape
     Y_pred = compute_predictions(W, X, i_idx, j_idx)
@@ -70,6 +71,7 @@ def agd_step_W(W, X, Y, i_idx, j_idx, lr):
     return W - lr * grad_W
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_X(W, X, Y, i_idx, j_idx, lr):
     M, N2 = X.shape
     Y_pred = compute_predictions(W, X, i_idx, j_idx)

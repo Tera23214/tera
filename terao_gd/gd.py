@@ -29,19 +29,19 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-N1 = 3000   # Number of rows
-N2 = 3000   # Number of columns  
-M = 30      # Rank (hidden dimension)
+N1 = 1000   # Number of rows
+N2 = 1000   # Number of columns  
+M = 10      # Rank (hidden dimension)
 
-ALPHA_START =0.1
-ALPHA_STOP = 3.5
-ALPHA_STEP = 0.02
+ALPHA_START =0.5
+ALPHA_STOP = 5.0
+ALPHA_STEP = 0.5
 
 MAX_STEPS = 3000
 LR_BASE = 0.01     # Base learning rate (calibrated for N=1000)
@@ -59,24 +59,32 @@ def compute_predictions(
     X: torch.Tensor,       # (M, N2)
     i_idx: torch.Tensor,   # (C,)
     j_idx: torch.Tensor,   # (C,)
+    M: int,                # Rank for 1/√M scaling
 ) -> torch.Tensor:
     """
     Compute predictions Y_pred for observed entries.
     
-    Y_pred[c] = W[i_c,:] @ X[:,j_c] = sum_mu W[i_c, mu] * X[mu, j_c]
+    Y_pred[c] = (1/√M) * sum_mu W[i_c, mu] * X[mu, j_c]
+    
+    The 1/√M scaling ensures proper normalization: E[Y²] ~ O(1).
     """
     W_sel = W[i_idx.long(), :]       # (C, M)観測された行列の抽出
     X_sel = X[:, j_idx.long()].T     # (C, M)観測された行列のを抽出してから転置
     
-    Y_pred = (W_sel * X_sel).sum(dim=1)  # (C,)
+    Y_pred = (W_sel * X_sel).sum(dim=1) / math.sqrt(M)  # (C,)
     return Y_pred
 
 
-def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor) -> torch.Tensor:
-    """Compute MSE loss: L = sum((Y - Y_pred)^2)"""
-    return ((Y - Y_pred) ** 2).sum()
+def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
+    """
+    Compute MSE loss: L = M * sum((Y - Y_pred)^2)
+    
+    The M factor compensates for 1/√M scaling in Y, keeping gradient scale unchanged.
+    """
+    return M * ((Y - Y_pred) ** 2).sum()
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_W(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -93,12 +101,13 @@ def agd_step_W(
     N1, M = W.shape
     
     # Compute predictions and residuals
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y  # (C,)
     
     # Compute gradient contributions: 2 * residual * X[mu, j_c]
     X_sel = X[:, j_idx.long()].T     # (C, M)
-    grad_contrib = 2.0 * residual.unsqueeze(1) * X_sel  # (C, M)解析的な結果を用いている
+    # Gradient includes M factor from loss and 1/√M from Y, net effect: √M factor
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * X_sel  # (C, M)
     
     # Scatter-add gradients to W
     grad_W = torch.zeros_like(W)
@@ -109,6 +118,7 @@ def agd_step_W(
     return W_new
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_X(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -125,12 +135,14 @@ def agd_step_X(
     M, N2 = X.shape
     
     # Compute predictions and residuals
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    N1 = W.shape[0]  # Get N1 for M parameter
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y  # (C,)
     
     # Compute gradient contributions: 2 * residual * W[i_c, mu]
     W_sel = W[i_idx.long(), :]       # (C, M)
-    grad_contrib = 2.0 * residual.unsqueeze(1) * W_sel  # (C, M)
+    # Gradient includes M factor from loss and 1/√M from Y, net effect: √M factor
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * W_sel  # (C, M)
     
     # Scatter-add gradients to X
     grad_X = torch.zeros_like(X)
@@ -196,7 +208,7 @@ def train_single_replica(
         return 0.0, 0.0, 0
     
     # Generate Y (observations)
-    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx)
+    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
     
     # Initialize student randomly
     torch.manual_seed(seed + 2000)
@@ -220,8 +232,8 @@ def train_single_replica(
         
         # Check for convergence every 100 steps
         if step % 100 == 0 or step == MAX_STEPS - 1:
-            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx)
-            loss = compute_loss(Y, Y_pred).item()
+            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
+            loss = compute_loss(Y, Y_pred, M).item()
             final_loss = loss
             
             if loss < CONVERGENCE_THRESHOLD:

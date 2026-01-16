@@ -23,7 +23,7 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp.core import train_single_replica
+from terao_gamp_gaussian.core import train_single_replica
 
 # ============================================================================
 # Configuration

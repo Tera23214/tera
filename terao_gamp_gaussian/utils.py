@@ -51,14 +51,16 @@ def compute_predictions(
     X: torch.Tensor,       # (M, N2)
     i_idx: torch.Tensor,   # (C,)
     j_idx: torch.Tensor,   # (C,)
+    M: int,                # Rank for 1/√M scaling
 ) -> torch.Tensor:
     """
     Compute predictions Y_pred for observed entries.
     
-    Y_pred[c] = W[i_c,:] @ X[:,j_c] = sum_mu W[i_c, mu] * X[mu, j_c]
+    Y_pred[c] = (1/√M) * sum_mu W[i_c, mu] * X[mu, j_c]
     """
+    import math
     W_sel = W[i_idx.long(), :]       # (C, M)
     X_sel = X[:, j_idx.long()].T     # (C, M)
     
-    Y_pred = (W_sel * X_sel).sum(dim=1)  # (C,)
+    Y_pred = (W_sel * X_sel).sum(dim=1) / math.sqrt(M)  # (C,)
     return Y_pred

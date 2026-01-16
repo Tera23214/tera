@@ -72,7 +72,7 @@ class ScriptBundler:
     def bundle_bigamp_train(self) -> Path:
         """Generate bigamp_train.py from smf modules."""
         from smf.modules.graphs.uniform import Dinic, UniformGraph
-        from terao_gamp.graph import RandomGraph
+        from terao_gamp_gaussian.graph import RandomGraph
         from smf.modules.teachers.standard import StandardTeacher
         from smf.modules.metrics.overlap import (
             compute_cosine_similarity,

@@ -26,7 +26,7 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -57,24 +57,26 @@ def compute_predictions(
     X: torch.Tensor,       # (M, N2)
     i_idx: torch.Tensor,   # (C,)
     j_idx: torch.Tensor,   # (C,)
+    M: int,                # Rank for 1/√M scaling
 ) -> torch.Tensor:
     """
     Compute predictions Y_pred for observed entries.
     
-    Y_pred[c] = W[i_c,:] @ X[:,j_c] = sum_mu W[i_c, mu] * X[mu, j_c]
+    Y_pred[c] = (1/√M) * sum_mu W[i_c, mu] * X[mu, j_c]
     """
     W_sel = W[i_idx.long(), :]       # (C, M)
     X_sel = X[:, j_idx.long()].T     # (C, M)
     
-    Y_pred = (W_sel * X_sel).sum(dim=1)  # (C,)
+    Y_pred = (W_sel * X_sel).sum(dim=1) / math.sqrt(M)  # (C,)
     return Y_pred
 
 
-def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor) -> torch.Tensor:
-    """Compute MSE loss: L = sum((Y - Y_pred)^2)"""
-    return ((Y - Y_pred) ** 2).sum()
+def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
+    """Compute MSE loss: L = M * sum((Y - Y_pred)^2)"""
+    return M * ((Y - Y_pred) ** 2).sum()
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_W(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -91,12 +93,12 @@ def agd_step_W(
     N1, M = W.shape
     
     # Compute predictions and residuals
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y  # (C,)
     
-    # Compute gradient contributions: 2 * residual * X[mu, j_c]
+    # Compute gradient contributions: 2 * √M * residual * X[mu, j_c]
     X_sel = X[:, j_idx.long()].T     # (C, M)
-    grad_contrib = 2.0 * residual.unsqueeze(1) * X_sel  # (C, M)
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * X_sel  # (C, M)
     
     # Scatter-add gradients to W
     grad_W = torch.zeros_like(W)
@@ -107,6 +109,7 @@ def agd_step_W(
     return W_new
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_X(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -123,12 +126,12 @@ def agd_step_X(
     M, N2 = X.shape
     
     # Compute predictions and residuals
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y  # (C,)
     
-    # Compute gradient contributions: 2 * residual * W[i_c, mu]
+    # Compute gradient contributions: 2 * √M * residual * W[i_c, mu]
     W_sel = W[i_idx.long(), :]       # (C, M)
-    grad_contrib = 2.0 * residual.unsqueeze(1) * W_sel  # (C, M)
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * W_sel  # (C, M)
     
     # Scatter-add gradients to X
     grad_X = torch.zeros_like(X)
@@ -272,8 +275,8 @@ def train_single_student(
         
         # Check for convergence every 100 steps
         if step % 100 == 0 or step == MAX_STEPS - 1:
-            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx)
-            loss = compute_loss(Y, Y_pred).item()
+            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
+            loss = compute_loss(Y, Y_pred, M).item()
             final_loss = loss
             
             if loss < CONVERGENCE_THRESHOLD:
@@ -312,7 +315,7 @@ def train_multi_students(
         }
     
     # Generate Y (observations)
-    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx)
+    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
     
     # Train multiple students
     students = []

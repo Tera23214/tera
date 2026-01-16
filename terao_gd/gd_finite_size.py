@@ -28,7 +28,7 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp.graph import RandomGraph
+from terao_gamp_gaussian.graph import RandomGraph
 
 # ============================================================================
 # Configuration
@@ -53,33 +53,37 @@ CONVERGENCE_THRESHOLD = 1e-6
 # AGD Helper Functions
 # ============================================================================
 
-def compute_predictions(W, X, i_idx, j_idx):
+def compute_predictions(W, X, i_idx, j_idx, M):
+    """Compute Y_pred = (1/√M) * sum_mu W_iμ X_μj"""
     W_sel = W[i_idx.long(), :]
     X_sel = X[:, j_idx.long()].T
-    return (W_sel * X_sel).sum(dim=1)
+    return (W_sel * X_sel).sum(dim=1) / math.sqrt(M)
 
 
-def compute_loss(Y, Y_pred):
-    return ((Y - Y_pred) ** 2).sum()
+def compute_loss(Y, Y_pred, M):
+    """Compute MSE loss with M factor to preserve gradient scale"""
+    return M * ((Y - Y_pred) ** 2).sum()
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_W(W, X, Y, i_idx, j_idx, lr):
     N1, M = W.shape
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y
     X_sel = X[:, j_idx.long()].T
-    grad_contrib = 2.0 * residual.unsqueeze(1) * X_sel
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * X_sel
     grad_W = torch.zeros_like(W)
     grad_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), grad_contrib)
     return W - lr * grad_W
 
 
+@torch.compile(mode="reduce-overhead")
 def agd_step_X(W, X, Y, i_idx, j_idx, lr):
     M, N2 = X.shape
-    Y_pred = compute_predictions(W, X, i_idx, j_idx)
+    Y_pred = compute_predictions(W, X, i_idx, j_idx, M)
     residual = Y_pred - Y
     W_sel = W[i_idx.long(), :]
-    grad_contrib = 2.0 * residual.unsqueeze(1) * W_sel
+    grad_contrib = 2.0 * math.sqrt(M) * residual.unsqueeze(1) * W_sel
     grad_X = torch.zeros_like(X)
     grad_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), grad_contrib.T)
     return X - lr * grad_X
@@ -117,7 +121,7 @@ def train_single_replica(N, M, alpha, device, seed):
         return 0.0, 0.0, 0
     
     # Generate Y
-    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx)
+    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
     
     # Initialize student (Cold Start)
     torch.manual_seed(seed + 2000)
@@ -135,8 +139,8 @@ def train_single_replica(N, M, alpha, device, seed):
         X_hat = normalize_to_unit_variance(X_hat)
         
         if step % 100 == 0 or step == MAX_STEPS - 1:
-            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx)
-            loss = compute_loss(Y, Y_pred).item()
+            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
+            loss = compute_loss(Y, Y_pred, M).item()
             final_loss = loss
             if loss < CONVERGENCE_THRESHOLD:
                 steps_taken = step + 1
