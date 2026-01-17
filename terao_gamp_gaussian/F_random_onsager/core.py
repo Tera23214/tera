@@ -153,58 +153,73 @@ def gamp_step_with_F_onsager(
     g = torch.clamp(g, min=-100.0, max=100.0)  # Prevent extreme g values
     
     # ========================================================================
-    # Step 4: Compute T Onsager correction coefficients (using g, not dg)
+    # Step 4: Compute T Onsager correction coefficients
+    # Paper formula for W: -(1/√M) F g^{t-1} m_W^{t-1} (v_X^t - m_X^{t,2})
     # ========================================================================
     
-    # Onsager for W: uses g and (v_X - m_X²) at time t
-    # Contribution: (1/√M) g^{t-1} × F × (v_X - m_X²) × m_X^{t-1}
-    onsager_W_contrib = scale * g_prev.unsqueeze(1) * F * var_term_X * X_prev_sel  # (C, M)
+    # Onsager for W: (1/√M) g^{t-1} × F × (v_X^t - m_X^{t,2})
+    # Note: m_W^{t-1} is multiplied later in T_W calculation
+    onsager_W_contrib = scale * g_prev.unsqueeze(1) * F * var_term_X  # (C, M)
     onsager_W = torch.zeros_like(m_W)
     onsager_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), onsager_W_contrib)
     
-    # Onsager for X: uses g and (v_W - m_W²) at time t
-    onsager_X_contrib = scale * g_prev.unsqueeze(1) * F * var_term_W * W_prev_sel  # (C, M)
+    # Onsager for X: (1/√M) g^{t-1} × F × (v_W^t - m_W^{t,2})
+    # Note: m_X^{t-1} is multiplied later in T_X calculation
+    onsager_X_contrib = scale * g_prev.unsqueeze(1) * F * var_term_W  # (C, M)
     onsager_X = torch.zeros_like(m_X)
     onsager_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), onsager_X_contrib.T)
     
     # ========================================================================
     # Step 5: Update Sigma, T with Onsager correction
+    # Paper formula: Σ = -1 / (Σ_c (1/M) F²_cμ × ∂g/∂ω × m²)
+    # Since ∂g/∂ω = -1/(V+σ²), we have: Σ = 1 / (Σ_c (1/M) F²_cμ × (1/(V+σ²)) × m²)
+    # 
+    # Paper formula: T/Σ = m/Σ + sum - Onsager
+    # Therefore: T = m + Σ × (sum - Onsager)
     # ========================================================================
     
     # Update W messages
-    Sigma_W = torch.zeros_like(m_W)
-    T_W = m_W.clone()
+    Sigma_W_denom = torch.zeros_like(m_W)
     
-    # Σ contribution: F[c,μ]² × (1/M) × (-dg) × m_X²
+    # Denominator: (1/M) × F²_cμ × (-∂g_c) × m_X²
     dg_expanded = scale_sq * (-dg).unsqueeze(1) * (X_sel ** 2) * F_sq  # (C, M)
-    Sigma_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
+    Sigma_W_denom.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
     
-    # T contribution: F[c,μ] × (1/√M) × g × m_X
+    # Apply reciprocal: Σ = 1 / denominator
+    Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
+    
+    # Sum contribution: Σ_c (1/√M) F g m_X
+    sum_W = torch.zeros_like(m_W)
     g_expanded = scale * g.unsqueeze(1) * X_sel * F  # (C, M)
-    T_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
+    sum_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
     
-    # Apply Onsager correction: subtract Onsager × m_W_prev
-    T_W = T_W - onsager_W * m_W_prev
+    # T = m + Σ × (sum - Onsager × m_prev)
+    # where Onsager = (1/√M) g^{t-1} F (v_X - m_X²)
+    T_W = m_W + Sigma_W * (sum_W - onsager_W * m_W_prev)
     
     # Apply f_input for W
-    m_W_new, v_W_new = f_input(torch.clamp(Sigma_W, min=1e-10), T_W)
+    m_W_new, v_W_new = f_input(Sigma_W, T_W)
     v_W_new = torch.clamp(v_W_new, min=1e-8, max=100.0)  # Stability clamp
     
     # Update X messages (symmetric to W)
-    Sigma_X = torch.zeros_like(m_X)
-    T_X = m_X.clone()
+    Sigma_X_denom = torch.zeros_like(m_X)
     
     dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2) * F_sq
-    Sigma_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
+    Sigma_X_denom.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
     
+    # Apply reciprocal for X
+    Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
+    
+    # Sum contribution for X
+    sum_X = torch.zeros_like(m_X)
     g_expanded_X = scale * g.unsqueeze(1) * W_sel * F
-    T_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
+    sum_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
     
-    # Apply Onsager correction for X
-    T_X = T_X - onsager_X * m_X_prev
+    # T = m + Σ × (sum - Onsager × m_prev)
+    T_X = m_X + Sigma_X * (sum_X - onsager_X * m_X_prev)
     
     # Apply f_input for X
-    m_X_new, v_X_new = f_input(torch.clamp(Sigma_X, min=1e-10), T_X)
+    m_X_new, v_X_new = f_input(Sigma_X, T_X)
     v_X_new = torch.clamp(v_X_new, min=1e-8, max=100.0)  # Stability clamp
     
     # Apply damping

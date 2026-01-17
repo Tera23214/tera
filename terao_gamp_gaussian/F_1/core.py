@@ -128,26 +128,31 @@ def gamp_step(
     # Step 3: Update omega and V (Alg2.1) with Onsager correction
     # ========================================================================
     
-    W_sel = m_W[i_idx.long(), :]      # (C, M)
-    X_sel = m_X[:, j_idx.long()].T    # (C, M)
+    W_sel = m_W[i_idx.long(), :]      # (C, M) - m_W^t
+    X_sel = m_X[:, j_idx.long()].T    # (C, M) - m_X^t
+    vW_sel = v_W[i_idx.long(), :]     # (C, M) - v_W^t
+    vX_sel = v_X[:, j_idx.long()].T   # (C, M) - v_X^t
+    W_prev_sel = m_W_prev[i_idx.long(), :]    # (C, M) - m_W^{t-1}
+    X_prev_sel = m_X_prev[:, j_idx.long()].T  # (C, M) - m_X^{t-1}
     
-    # Main term: (λ/√M) Σ_μ m_W × m_X
+    # Main term: (λ/√M) Σ_μ m_W^t × m_X^t
     omega_main = scale * (W_sel * X_sel).sum(dim=1)  # (C,)
     
-    # Onsager correction term: (λ/√M) g^{t-1} Σ (v - m²) × m^{t-1}
-    # For F=1: -(λ/√M) g^{t-1} Σ (v_jν - m_jν²) × m_kν × m_kν^{t-1}
-    vW_sel = v_W[i_idx.long(), :]     # (C, M)
-    vX_sel = v_X[:, j_idx.long()].T   # (C, M)
-    W_prev_sel = m_W_prev[i_idx.long(), :]  # (C, M)
-    X_prev_sel = m_X_prev[:, j_idx.long()].T  # (C, M)
+    # Onsager correction (both W-side and X-side) with λ/√M scaling
+    # Formula: ω = main - (λ/√M) g^{t-1} Σ_j (v_j^t - (m_j^t)²) × Π_k m_k^t × m_k^{t-1}
     
-    # (v - m²) term for X side
-    var_term_X = vX_sel - X_sel ** 2  # (C, M)
-    # Onsager: (λ/√M) g^{t-1} × Σ_μ (v_X - m_X²) × m_W × m_W^{t-1}
-    onsager = scale * g_prev.unsqueeze(1) * (var_term_X * W_sel * W_prev_sel).sum(dim=1, keepdim=True)
-    onsager = onsager.squeeze(1)  # (C,)
+    # (v - m²) variance terms at time t - clamp to ensure non-negative
+    var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)  # (C, M)
+    var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)  # (C, M)
     
-    omega = omega_main - onsager  # (C,)
+    # W-side Onsager: -(λ/√M) g^{t-1} Σ_μ (v_X^t - (m_X^t)²) × m_W^t × m_W^{t-1}
+    onsager_W_side = scale * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
+    
+    # X-side Onsager: -(λ/√M) g^{t-1} Σ_μ (v_W^t - (m_W^t)²) × m_X^t × m_X^{t-1}
+    onsager_X_side = scale * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
+    
+    # Combined omega with both Onsager terms
+    omega = omega_main - g_prev * (onsager_W_side + onsager_X_side)  # (C,)
     
     # V = (λ²/M) * Σ_μ (v_W × v_X - m_W² × m_X²)
     # v_W, v_X are second moments E[x²], so this gives variance of WX
