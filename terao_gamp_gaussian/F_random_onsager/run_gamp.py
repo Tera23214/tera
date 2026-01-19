@@ -25,20 +25,20 @@ from terao_gamp_gaussian.F_random_onsager.core import train_single_replica
 # Configuration
 # ============================================================================
 
-N1 = 1000
-N2 = 1000
-M = 10
+N1 = 5000
+N2 = 5000
+M = 50
 
-ALPHA_START = 0.5
-ALPHA_STOP = 5.0
-ALPHA_STEP = 0.5
+ALPHA_START = 6
+ALPHA_STOP = 7.0
+ALPHA_STEP = 1
 
-MAX_STEPS = 500
+MAX_STEPS = 5000
 DAMPING = 0.5
 NOISE_VAR = 1e-10
 SEED = 42
-NUM_REPLICAS = 10
-CONVERGENCE_THRESHOLD = 1e-6
+NUM_REPLICAS = 1
+CONVERGENCE_THRESHOLD = 1e-10
 
 # ============================================================================
 # Main
