@@ -35,13 +35,12 @@ N1 = 1000
 N2 = 1000
 M = 10
 
-ALPHA_START = 1.5
-ALPHA_STOP = 3.5
-ALPHA_STEP = 0.25
+ALPHA_START = 0.5
+ALPHA_STOP = 7.0
+ALPHA_STEP = 0.5
 
 MAX_STEPS = 3000
-LR_BASE = 0.01
-LR = LR_BASE * (1e6 / (N1 * N2))
+LR_BASE = 1.0  # Base learning rate (will be scaled by E)
 SEED = 42
 NUM_REPLICAS = 5
 
@@ -49,7 +48,7 @@ NUM_REPLICAS = 5
 SIGMA_Y = 0.1
 
 # Initialization noise (standard deviation). Use multiple values for comparison.
-SIGMA_INIT_VALUES = [0.0, 0.1, 0.5, 1.0]
+SIGMA_INIT_VALUES = [float('inf'), 0.1, 0.5, 1.0, 4.0, 10.0]  # inf = cold start
 
 CONVERGENCE_THRESHOLD = 1e-6
 
@@ -139,13 +138,15 @@ def train_single_replica(alpha, sigma_init, sigma_y, device, seed):
         W_hat = normalize_to_unit_mean_square(W_hat)
         X_hat = normalize_to_unit_mean_square(X_hat)
 
-    # AGD loop
+    # AGD loop with LR scaled by sqrt of edge count
+    # Using sqrt(C) instead of C for better balance between convergence and stability
+    lr_scaled = LR_BASE / math.sqrt(C)
     final_loss = 0.0
     steps_taken = MAX_STEPS
 
     for step in range(MAX_STEPS):
-        W_hat = agd_step_W(W_hat, X_hat, Y_noisy, i_idx, j_idx, LR)
-        X_hat = agd_step_X(W_hat, X_hat, Y_noisy, i_idx, j_idx, LR)
+        W_hat = agd_step_W(W_hat, X_hat, Y_noisy, i_idx, j_idx, lr_scaled)
+        X_hat = agd_step_X(W_hat, X_hat, Y_noisy, i_idx, j_idx, lr_scaled)
         W_hat = normalize_to_unit_mean_square(W_hat)
         X_hat = normalize_to_unit_mean_square(X_hat)
 

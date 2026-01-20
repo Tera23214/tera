@@ -1,0 +1,336 @@
+#!/usr/bin/env python
+"""
+G-AMP (Generalized Approximate Message Passing) Core Module with F=1 and Onsager Term.
+
+Implements the G-AMP algorithm for sparse matrix factorization
+with F = 1 (constant) and proper Onsager correction.
+
+Observation model:
+    Y_obs = (1/√M) Σ_μ W_{i,μ} X_{μ,j} + ΔZ
+
+where F = 1 (constant, no spreading).
+
+The Onsager term corrects for the self-correlation in the iteration,
+which is critical for proper convergence in message passing algorithms.
+"""
+
+import sys
+from pathlib import Path
+import torch
+import math
+
+# Add parent directories to path
+repo_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(repo_root))
+
+from terao_gamp_gaussian.graph import BiregularGraph
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy
+
+
+# ============================================================================
+# G-AMP Functions with F=1 and Onsager Correction
+# ============================================================================
+
+def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Input function for Gaussian prior (Eq. 178 in paper).
+    
+    For standard Gaussian prior N(0, 1):
+        f_input(Σ, T) = T / (Σ + 1)
+        f_input,II(Σ, T) = Σ / (Σ + 1) + T² / (Σ + 1)²
+    """
+    denom = 1.0 + Sigma
+    denom = torch.clamp(denom, min=1e-10)
+    
+    m = T / denom
+    v = Sigma / denom + (T ** 2) / (denom ** 2)
+    
+    return m, v
+
+
+def g_out(
+    omega: torch.Tensor,
+    y: torch.Tensor,
+    V: torch.Tensor,
+    noise_var: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Output function for Gaussian noise channel.
+    
+    g = (y - omega) / (V + sigma^2)
+    dg/d_omega = -1 / (V + sigma^2)
+    """
+    denom = V + noise_var
+    denom = torch.clamp(denom, min=1e-10)
+    
+    g = (y - omega) / denom
+    dg = -1.0 / denom
+    
+    return g, dg
+
+
+def gamp_step_with_onsager(
+    m_W: torch.Tensor,      # (N1, M) - W messages (mean) at time t
+    v_W: torch.Tensor,      # (N1, M) - W messages (second moment) at time t
+    m_X: torch.Tensor,      # (M, N2) - X messages (mean) at time t
+    v_X: torch.Tensor,      # (M, N2) - X messages (second moment) at time t
+    m_W_prev: torch.Tensor, # (N1, M) - W messages from t-1 (for Onsager)
+    m_X_prev: torch.Tensor, # (M, N2) - X messages from t-1 (for Onsager)
+    Y: torch.Tensor,        # (C,) - Observed values
+    i_idx: torch.Tensor,    # (C,) - Row indices
+    j_idx: torch.Tensor,    # (C,) - Column indices
+    g_prev: torch.Tensor,   # (C,) - Previous g values
+    noise_var: float,       # Noise variance
+    damping: float,         # Damping factor
+    N1: int,
+    N2: int,
+    M: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Single G-AMP step with F = 1 (constant) and proper Onsager correction.
+    
+    The observation model is:
+        Y_c = (1/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
+    
+    F = 1 for all edges and components (no random spreading).
+    
+    Onsager Correction (following paper equations):
+        ω includes both W-side and X-side Onsager terms
+        T Onsager uses g (not dg) with time-t (v - m²)
+    """
+    C = Y.shape[0]
+    device = Y.device
+    
+    scale = 1.0 / math.sqrt(M)
+    scale_sq = 1.0 / M
+    
+    # ========================================================================
+    # Step 1: Compute omega with Onsager correction
+    # ========================================================================
+    
+    W_sel = m_W[i_idx.long(), :]      # (C, M)
+    X_sel = m_X[:, j_idx.long()].T    # (C, M)
+    vW_sel = v_W[i_idx.long(), :]     # (C, M)
+    vX_sel = v_X[:, j_idx.long()].T   # (C, M)
+    W_prev_sel = m_W_prev[i_idx.long(), :]    # (C, M)
+    X_prev_sel = m_X_prev[:, j_idx.long()].T  # (C, M)
+    
+    # Main term: ω_main = (1/√M) Σ_μ m_W × m_X
+    # Note: F=1, so no F factor
+    omega_main = scale * (W_sel * X_sel).sum(dim=1)  # (C,)
+    
+    # (v - m²) at time t - clamp to ensure non-negative (can be negative due to v clamping)
+    var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)  # (C, M)
+    var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)  # (C, M)
+    
+    # W-side Onsager: -(1/√M) g^{t-1} Σ_μ (v_X - m_X²) m_W m_W^{t-1}
+    # Note: F=1, so no F factor
+    onsager_W_side = scale * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
+    
+    # X-side Onsager: -(1/√M) g^{t-1} Σ_μ (v_W - m_W²) m_X m_X^{t-1}
+    # Note: F=1, so no F factor
+    onsager_X_side = scale * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
+    
+    # Combined omega with Onsager correction
+    omega = omega_main - g_prev * (onsager_W_side + onsager_X_side)  # (C,)
+    
+    # ========================================================================
+    # Step 2: Compute V
+    # ========================================================================
+    
+    # V = (1/M) Σ_μ (v_W × v_X - m_W² × m_X²)
+    # Note: F=1, so no F² factor
+    V = scale_sq * (vW_sel * vX_sel - (W_sel ** 2) * (X_sel ** 2)).sum(dim=1)
+    V = torch.clamp(V, min=1e-10)  # Ensure positive
+    
+    # ========================================================================
+    # Step 3: Output function
+    # ========================================================================
+    
+    g, dg = g_out(omega, Y, V, noise_var)
+    
+    # Apply damping to g and clamp for stability
+    g = damping * g + (1 - damping) * g_prev
+    g = torch.clamp(g, min=-100.0, max=100.0)  # Prevent extreme g values
+    
+    # ========================================================================
+    # Step 4: Compute T Onsager correction coefficients
+    # Paper formula for W: -(1/√M) g^{t-1} m_W^{t-1} (v_X^t - m_X^{t,2})
+    # Note: F=1, so no F factor
+    # ========================================================================
+    
+    # Onsager for W: (1/√M) g^{t-1} × (v_X^t - m_X^{t,2})
+    # Note: m_W^{t-1} is multiplied later in T_W calculation
+    onsager_W_contrib = scale * g_prev.unsqueeze(1) * var_term_X  # (C, M)
+    onsager_W = torch.zeros_like(m_W)
+    onsager_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), onsager_W_contrib)
+    
+    # Onsager for X: (1/√M) g^{t-1} × (v_W^t - m_W^{t,2})
+    # Note: m_X^{t-1} is multiplied later in T_X calculation
+    onsager_X_contrib = scale * g_prev.unsqueeze(1) * var_term_W  # (C, M)
+    onsager_X = torch.zeros_like(m_X)
+    onsager_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), onsager_X_contrib.T)
+    
+    # ========================================================================
+    # Step 5: Update Sigma, T with Onsager correction
+    # Paper formula: Σ = -1 / (Σ_c (1/M) × ∂g/∂ω × m²)
+    # Since ∂g/∂ω = -1/(V+σ²), we have: Σ = 1 / (Σ_c (1/M) × (1/(V+σ²)) × m²)
+    # 
+    # Paper formula: T/Σ = m/Σ + sum - Onsager
+    # Therefore: T = m + Σ × (sum - Onsager)
+    # Note: F=1, so no F² factor in Sigma and no F factor in T
+    # ========================================================================
+    
+    # Update W messages
+    Sigma_W_denom = torch.zeros_like(m_W)
+    
+    # Denominator: (1/M) × (-∂g_c) × m_X²
+    # Note: F=1, so no F² factor
+    dg_expanded = scale_sq * (-dg).unsqueeze(1) * (X_sel ** 2)  # (C, M)
+    Sigma_W_denom.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
+    
+    # Apply reciprocal: Σ = 1 / denominator
+    Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
+    
+    # Sum contribution: Σ_c (1/√M) g m_X
+    # Note: F=1, so no F factor
+    sum_W = torch.zeros_like(m_W)
+    g_expanded = scale * g.unsqueeze(1) * X_sel  # (C, M)
+    sum_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
+    
+    # T = m + Σ × (sum - Onsager × m_prev)
+    # where Onsager = (1/√M) g^{t-1} (v_X - m_X²)
+    T_W = m_W + Sigma_W * (sum_W - onsager_W * m_W_prev)
+    
+    # Apply f_input for W
+    m_W_new, v_W_new = f_input(Sigma_W, T_W)
+    v_W_new = torch.clamp(v_W_new, min=1e-8, max=100.0)  # Stability clamp
+    
+    # Update X messages (symmetric to W)
+    Sigma_X_denom = torch.zeros_like(m_X)
+    
+    # Note: F=1, so no F² factor
+    dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2)
+    Sigma_X_denom.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
+    
+    # Apply reciprocal for X
+    Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
+    
+    # Sum contribution for X
+    # Note: F=1, so no F factor
+    sum_X = torch.zeros_like(m_X)
+    g_expanded_X = scale * g.unsqueeze(1) * W_sel
+    sum_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
+    
+    # T = m + Σ × (sum - Onsager × m_prev)
+    T_X = m_X + Sigma_X * (sum_X - onsager_X * m_X_prev)
+    
+    # Apply f_input for X
+    m_X_new, v_X_new = f_input(Sigma_X, T_X)
+    v_X_new = torch.clamp(v_X_new, min=1e-8, max=100.0)  # Stability clamp
+    
+    # Apply damping
+    m_W_new = damping * m_W_new + (1 - damping) * m_W
+    v_W_new = damping * v_W_new + (1 - damping) * v_W
+    m_X_new = damping * m_X_new + (1 - damping) * m_X
+    v_X_new = damping * v_X_new + (1 - damping) * v_X
+    
+    return m_W_new, v_W_new, m_X_new, v_X_new, g
+
+
+def train_single_replica(
+    alpha: float,
+    device: torch.device,
+    seed: int,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 10,
+    max_steps: int = 500,
+    damping: float = 0.5,
+    noise_var: float = 1e-10,
+    convergence_threshold: float = 1e-6,
+) -> tuple[float, float, int]:
+    """
+    Train a single replica using G-AMP with F = 1 and Onsager correction.
+    
+    Observation model:
+        Y_c = (1/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
+    
+    where F = 1 (constant, no random spreading).
+    
+    This version includes proper Onsager correction using t-1 messages.
+    """
+    # Generate observation graph (BiregularGraph for Dense Limit)
+    graph = BiregularGraph()
+    i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(N1, N2, M, alpha, device, seed)
+    
+    if E == 0:
+        return 0.0, 0.0, 0
+    
+    # Generate teacher matrices W ~ N(0,1), X ~ N(0,1)
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+    
+    # Generate observations without F: Y = (1/√M) Σ_μ W X
+    # Note: F=1, so no F factor
+    W_sel = W_teacher[i_idx.long(), :]
+    X_sel = X_teacher[:, j_idx.long()].T
+    Y = (1.0 / math.sqrt(M)) * (W_sel * X_sel).sum(dim=1)
+    
+    # Add noise
+    torch.manual_seed(seed + 1000)
+    noise = torch.randn_like(Y) * math.sqrt(noise_var)
+    Y_noisy = Y + noise
+    
+    # Initialize messages: m~N(0, 0.1) small to ensure V > 0, v=1.0
+    torch.manual_seed(seed + 2000)
+    m_W = torch.randn(N1, M, device=device) * 0.1  # Small init
+    v_W = torch.ones(N1, M, device=device)
+    m_X = torch.randn(M, N2, device=device) * 0.1  # Small init
+    v_X = torch.ones(M, N2, device=device)
+    g_prev = torch.zeros(E, device=device)
+    
+    m_W_prev = m_W.clone()
+    m_X_prev = m_X.clone()
+    
+    # G-AMP iterations
+    final_loss = 0.0
+    steps_taken = max_steps
+    prev_loss = float('inf')
+    
+    for step in range(max_steps):
+        m_W_old = m_W.clone()
+        m_X_old = m_X.clone()
+        
+        m_W, v_W, m_X, v_X, g_prev = gamp_step_with_onsager(
+            m_W, v_W, m_X, v_X, m_W_prev, m_X_prev,
+            Y_noisy, i_idx, j_idx, g_prev,
+            noise_var, damping, N1, N2, M
+        )
+        
+        m_W_prev = m_W_old
+        m_X_prev = m_X_old
+        
+        # Check convergence
+        if step % 50 == 0 or step == max_steps - 1:
+            W_sel = m_W[i_idx.long(), :]
+            X_sel = m_X[:, j_idx.long()].T
+            Y_pred = (1.0 / math.sqrt(M)) * (W_sel * X_sel).sum(dim=1)
+            
+            loss = ((Y_noisy - Y_pred) ** 2).mean().item()
+            final_loss = loss
+            
+            if abs(prev_loss - loss) < convergence_threshold:
+                steps_taken = step + 1
+                break
+            prev_loss = loss
+    
+    # Normalize student matrices
+    m_W = normalize_to_unit_variance(m_W)
+    m_X = normalize_to_unit_variance(m_X)
+    
+    # Compute Q_Y
+    qy = compute_qy(m_W, m_X, W_teacher, X_teacher)
+    
+    return qy, final_loss, steps_taken
