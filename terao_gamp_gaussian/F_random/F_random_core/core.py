@@ -13,6 +13,7 @@ where F[c,μ] ~ N(0,1) i.i.d. for each observed edge c.
 
 import sys
 from pathlib import Path
+from typing import Tuple
 import torch
 import math
 
@@ -21,53 +22,15 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.graph import BiregularGraph
-from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy, f_input, g_out
 
 
 # ============================================================================
 # G-AMP Functions with Random F
 # ============================================================================
 
-def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Input function for Gaussian prior (Eq. 178 in paper).
-    
-    For standard Gaussian prior N(0, 1):
-        f_input(Σ, T) = T / (Σ + 1)
-        f_input,II(Σ, T) = Σ / (Σ + 1) + T² / (Σ + 1)²
-    """
-    denom = 1.0 + Sigma
-    denom = torch.clamp(denom, min=1e-10)
-    
-    m = T / denom
-    v = Sigma / denom + (T ** 2) / (denom ** 2)
-    
-    return m, v
 
-
-def g_out(
-    omega: torch.Tensor,
-    y: torch.Tensor,
-    V: torch.Tensor,
-    noise_var: float = 1e-10,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Output function for Gaussian noise channel.
-    
-    g = (y - omega) / (V + sigma^2)
-    dg/d_omega = -1 / (V + sigma^2)
-    """
-    denom = V + noise_var
-    denom = torch.clamp(denom, min=1e-10)
-    
-    g = (y - omega) / denom
-    dg = -1.0 / denom
-    
-    return g, dg
-
-
-@torch.compile(mode="reduce-overhead")
-def gamp_step_with_F(
+def _gamp_step_with_F_impl(
     m_W: torch.Tensor,      # (N1, M) - W messages (mean)
     v_W: torch.Tensor,      # (N1, M) - W messages (second moment)
     m_X: torch.Tensor,      # (M, N2) - X messages (mean)
@@ -83,7 +46,7 @@ def gamp_step_with_F(
     N1: int,
     N2: int,
     M: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Single G-AMP step with random F ~ N(0,1) per edge.
     
@@ -122,8 +85,8 @@ def gamp_step_with_F(
     
     g, dg = g_out(omega, Y, V, noise_var)
     
-    # Apply damping to g
-    g = damping * g + (1 - damping) * g_prev
+    # Apply damping to g (old-value biased)
+    g = damping * g_prev + (1 - damping) * g
     
     # ========================================================================
     # Step 3: Update Sigma, T with F
@@ -175,13 +138,20 @@ def gamp_step_with_F(
     # Apply f_input for X
     m_X_new, v_X_new = f_input(Sigma_X, T_X)
     
-    # Apply damping
-    m_W_new = damping * m_W_new + (1 - damping) * m_W
-    v_W_new = damping * v_W_new + (1 - damping) * v_W
-    m_X_new = damping * m_X_new + (1 - damping) * m_X
-    v_X_new = damping * v_X_new + (1 - damping) * v_X
+    # Apply damping (old-value biased)
+    m_W_new = damping * m_W + (1 - damping) * m_W_new
+    v_W_new = damping * v_W + (1 - damping) * v_W_new
+    m_X_new = damping * m_X + (1 - damping) * m_X_new
+    v_X_new = damping * v_X + (1 - damping) * v_X_new
     
     return m_W_new, v_W_new, m_X_new, v_X_new, g
+
+
+# Apply torch.compile only if PyTorch >= 2.0
+if hasattr(torch, 'compile'):
+    gamp_step_with_F = torch.compile(_gamp_step_with_F_impl, mode="reduce-overhead")
+else:
+    gamp_step_with_F = _gamp_step_with_F_impl
 
 
 def train_single_replica(
@@ -195,7 +165,7 @@ def train_single_replica(
     damping: float = 0.5,
     noise_var: float = 1e-10,
     convergence_threshold: float = 1e-6,
-) -> tuple[float, float, int]:
+) -> Tuple[float, float, int]:
     """
     Train a single replica using G-AMP with F ~ N(0,1) for spreading.
     

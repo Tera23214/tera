@@ -64,3 +64,57 @@ def compute_predictions(
     
     Y_pred = (W_sel * X_sel).sum(dim=1) / math.sqrt(M)  # (C,)
     return Y_pred
+
+
+def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Input function for Gaussian prior (Eq. 178 in paper).
+
+    For standard Gaussian prior N(0, 1):
+        f_input(Σ, T) = T / (Σ + 1)
+        f_input,II(Σ, T) = Σ / (Σ + 1) + T² / (Σ + 1)²
+
+    Args:
+        Sigma: Inverse variance parameter (Σ)
+        T: Mean parameter (scaled)
+
+    Returns:
+        m: Posterior mean = f_input(Σ, T)
+        v: Posterior second moment = f_input,II(Σ, T)
+    """
+    denom = 1.0 + Sigma
+
+    m = T / denom
+    v = Sigma / denom + (T ** 2) / (denom ** 2)
+
+    return m, v
+
+
+def g_out(
+    omega: torch.Tensor,
+    y: torch.Tensor,
+    V: torch.Tensor,
+    noise_var: float = 1e-10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Output function for Gaussian noise channel.
+
+    g = (y - omega) / (V + sigma^2)
+    dg/d_omega = -1 / (V + sigma^2)
+
+    Args:
+        omega: Current prediction
+        y: Observed value
+        V: Variance estimate
+        noise_var: Noise variance (sigma^2)
+
+    Returns:
+        g: Output function value
+        dg: Derivative of g w.r.t. omega
+    """
+    denom = V + noise_var
+
+    g = (y - omega) / denom
+    dg = -1.0 / denom
+
+    return g, dg

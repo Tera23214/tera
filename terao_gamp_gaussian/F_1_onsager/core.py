@@ -6,9 +6,9 @@ Implements the G-AMP algorithm for sparse matrix factorization
 with F = 1 (constant) and proper Onsager correction.
 
 Observation model:
-    Y_obs = (1/√M) Σ_μ W_{i,μ} X_{μ,j} + ΔZ
+    Y_obs = (λ/√M) Σ_μ W_{i,μ} X_{μ,j} + ΔZ
 
-where F = 1 (constant, no spreading).
+where F = 1 (constant, no spreading) and λ is the signal strength.
 
 The Onsager term corrects for the self-correlation in the iteration,
 which is critical for proper convergence in message passing algorithms.
@@ -24,49 +24,12 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.graph import BiregularGraph
-from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy, f_input, g_out
 
 
 # ============================================================================
 # G-AMP Functions with F=1 and Onsager Correction
 # ============================================================================
-
-def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Input function for Gaussian prior (Eq. 178 in paper).
-    
-    For standard Gaussian prior N(0, 1):
-        f_input(Σ, T) = T / (Σ + 1)
-        f_input,II(Σ, T) = Σ / (Σ + 1) + T² / (Σ + 1)²
-    """
-    denom = 1.0 + Sigma
-    denom = torch.clamp(denom, min=1e-10)
-    
-    m = T / denom
-    v = Sigma / denom + (T ** 2) / (denom ** 2)
-    
-    return m, v
-
-
-def g_out(
-    omega: torch.Tensor,
-    y: torch.Tensor,
-    V: torch.Tensor,
-    noise_var: float = 1e-10,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Output function for Gaussian noise channel.
-    
-    g = (y - omega) / (V + sigma^2)
-    dg/d_omega = -1 / (V + sigma^2)
-    """
-    denom = V + noise_var
-    denom = torch.clamp(denom, min=1e-10)
-    
-    g = (y - omega) / denom
-    dg = -1.0 / denom
-    
-    return g, dg
 
 
 def gamp_step_with_onsager(
@@ -80,6 +43,7 @@ def gamp_step_with_onsager(
     i_idx: torch.Tensor,    # (C,) - Row indices
     j_idx: torch.Tensor,    # (C,) - Column indices
     g_prev: torch.Tensor,   # (C,) - Previous g values
+    lam: float,             # Lambda = signal strength
     noise_var: float,       # Noise variance
     damping: float,         # Damping factor
     N1: int,
@@ -90,9 +54,10 @@ def gamp_step_with_onsager(
     Single G-AMP step with F = 1 (constant) and proper Onsager correction.
     
     The observation model is:
-        Y_c = (1/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
+        Y_c = (λ/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
     
     F = 1 for all edges and components (no random spreading).
+    λ is the signal strength parameter.
     
     Onsager Correction (following paper equations):
         ω includes both W-side and X-side Onsager terms
@@ -101,8 +66,8 @@ def gamp_step_with_onsager(
     C = Y.shape[0]
     device = Y.device
     
-    scale = 1.0 / math.sqrt(M)
-    scale_sq = 1.0 / M
+    scale = lam / math.sqrt(M)        # λ/√M
+    scale_sq = (lam ** 2) / M         # (λ/√M)² = λ²/M
     
     # ========================================================================
     # Step 1: Compute omega with Onsager correction
@@ -115,7 +80,7 @@ def gamp_step_with_onsager(
     W_prev_sel = m_W_prev[i_idx.long(), :]    # (C, M)
     X_prev_sel = m_X_prev[:, j_idx.long()].T  # (C, M)
     
-    # Main term: ω_main = (1/√M) Σ_μ m_W × m_X
+    # Main term: ω_main = (λ/√M) Σ_μ m_W × m_X
     # Note: F=1, so no F factor
     omega_main = scale * (W_sel * X_sel).sum(dim=1)  # (C,)
     
@@ -123,13 +88,11 @@ def gamp_step_with_onsager(
     var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)  # (C, M)
     var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)  # (C, M)
     
-    # W-side Onsager: -(1/√M) g^{t-1} Σ_μ (v_X - m_X²) m_W m_W^{t-1}
-    # Note: F=1, so no F factor
-    onsager_W_side = scale * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
+    # W-side Onsager: (λ²/M) g^{t-1} Σ_μ (v_X - m_X²) m_W m_W^{t-1}
+    onsager_W_side = scale_sq * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
     
-    # X-side Onsager: -(1/√M) g^{t-1} Σ_μ (v_W - m_W²) m_X m_X^{t-1}
-    # Note: F=1, so no F factor
-    onsager_X_side = scale * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
+    # X-side Onsager: (λ²/M) g^{t-1} Σ_μ (v_W - m_W²) m_X m_X^{t-1}
+    onsager_X_side = scale_sq * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
     
     # Combined omega with Onsager correction
     omega = omega_main - g_prev * (onsager_W_side + onsager_X_side)  # (C,)
@@ -138,7 +101,7 @@ def gamp_step_with_onsager(
     # Step 2: Compute V
     # ========================================================================
     
-    # V = (1/M) Σ_μ (v_W × v_X - m_W² × m_X²)
+    # V = (λ²/M) Σ_μ (v_W × v_X - m_W² × m_X²)
     # Note: F=1, so no F² factor
     V = scale_sq * (vW_sel * vX_sel - (W_sel ** 2) * (X_sel ** 2)).sum(dim=1)
     V = torch.clamp(V, min=1e-10)  # Ensure positive
@@ -149,23 +112,23 @@ def gamp_step_with_onsager(
     
     g, dg = g_out(omega, Y, V, noise_var)
     
-    # Apply damping to g and clamp for stability
-    g = damping * g + (1 - damping) * g_prev
+    # Apply damping to g and clamp for stability (old-value biased)
+    g = damping * g_prev + (1 - damping) * g
     g = torch.clamp(g, min=-100.0, max=100.0)  # Prevent extreme g values
     
     # ========================================================================
     # Step 4: Compute T Onsager correction coefficients
-    # Paper formula for W: -(1/√M) g^{t-1} m_W^{t-1} (v_X^t - m_X^{t,2})
+    # Paper formula for W: -(λ/√M) g^{t-1} m_W^{t-1} (v_X^t - m_X^{t,2})
     # Note: F=1, so no F factor
     # ========================================================================
     
-    # Onsager for W: (1/√M) g^{t-1} × (v_X^t - m_X^{t,2})
+    # Onsager for W: (λ/√M) g^{t-1} × (v_X^t - m_X^{t,2})
     # Note: m_W^{t-1} is multiplied later in T_W calculation
     onsager_W_contrib = scale * g_prev.unsqueeze(1) * var_term_X  # (C, M)
     onsager_W = torch.zeros_like(m_W)
     onsager_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), onsager_W_contrib)
     
-    # Onsager for X: (1/√M) g^{t-1} × (v_W^t - m_W^{t,2})
+    # Onsager for X: (λ/√M) g^{t-1} × (v_W^t - m_W^{t,2})
     # Note: m_X^{t-1} is multiplied later in T_X calculation
     onsager_X_contrib = scale * g_prev.unsqueeze(1) * var_term_W  # (C, M)
     onsager_X = torch.zeros_like(m_X)
@@ -173,8 +136,8 @@ def gamp_step_with_onsager(
     
     # ========================================================================
     # Step 5: Update Sigma, T with Onsager correction
-    # Paper formula: Σ = -1 / (Σ_c (1/M) × ∂g/∂ω × m²)
-    # Since ∂g/∂ω = -1/(V+σ²), we have: Σ = 1 / (Σ_c (1/M) × (1/(V+σ²)) × m²)
+    # Paper formula: Σ = -1 / (Σ_c (λ²/M) × ∂g/∂ω × m²)
+    # Since ∂g/∂ω = -1/(V+σ²), we have: Σ = 1 / (Σ_c (λ²/M) × (1/(V+σ²)) × m²)
     # 
     # Paper formula: T/Σ = m/Σ + sum - Onsager
     # Therefore: T = m + Σ × (sum - Onsager)
@@ -184,7 +147,7 @@ def gamp_step_with_onsager(
     # Update W messages
     Sigma_W_denom = torch.zeros_like(m_W)
     
-    # Denominator: (1/M) × (-∂g_c) × m_X²
+    # Denominator: (λ²/M) × (-∂g_c) × m_X²
     # Note: F=1, so no F² factor
     dg_expanded = scale_sq * (-dg).unsqueeze(1) * (X_sel ** 2)  # (C, M)
     Sigma_W_denom.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
@@ -192,14 +155,14 @@ def gamp_step_with_onsager(
     # Apply reciprocal: Σ = 1 / denominator
     Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
     
-    # Sum contribution: Σ_c (1/√M) g m_X
+    # Sum contribution: Σ_c (λ/√M) g m_X
     # Note: F=1, so no F factor
     sum_W = torch.zeros_like(m_W)
     g_expanded = scale * g.unsqueeze(1) * X_sel  # (C, M)
     sum_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
     
     # T = m + Σ × (sum - Onsager × m_prev)
-    # where Onsager = (1/√M) g^{t-1} (v_X - m_X²)
+    # where Onsager = (λ/√M) g^{t-1} (v_X - m_X²)
     T_W = m_W + Sigma_W * (sum_W - onsager_W * m_W_prev)
     
     # Apply f_input for W
@@ -216,7 +179,7 @@ def gamp_step_with_onsager(
     # Apply reciprocal for X
     Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
     
-    # Sum contribution for X
+    # Sum contribution for X: Σ_c (λ/√M) g m_W
     # Note: F=1, so no F factor
     sum_X = torch.zeros_like(m_X)
     g_expanded_X = scale * g.unsqueeze(1) * W_sel
@@ -229,11 +192,11 @@ def gamp_step_with_onsager(
     m_X_new, v_X_new = f_input(Sigma_X, T_X)
     v_X_new = torch.clamp(v_X_new, min=1e-8, max=100.0)  # Stability clamp
     
-    # Apply damping
-    m_W_new = damping * m_W_new + (1 - damping) * m_W
-    v_W_new = damping * v_W_new + (1 - damping) * v_W
-    m_X_new = damping * m_X_new + (1 - damping) * m_X
-    v_X_new = damping * v_X_new + (1 - damping) * v_X
+    # Apply damping (old-value biased)
+    m_W_new = damping * m_W + (1 - damping) * m_W_new
+    v_W_new = damping * v_W + (1 - damping) * v_W_new
+    m_X_new = damping * m_X + (1 - damping) * m_X_new
+    v_X_new = damping * v_X + (1 - damping) * v_X_new
     
     return m_W_new, v_W_new, m_X_new, v_X_new, g
 
@@ -249,12 +212,13 @@ def train_single_replica(
     damping: float = 0.5,
     noise_var: float = 1e-10,
     convergence_threshold: float = 1e-6,
+    lam: float = 1.0,  # Signal strength λ
 ) -> tuple[float, float, int]:
     """
     Train a single replica using G-AMP with F = 1 and Onsager correction.
     
     Observation model:
-        Y_c = (1/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
+        Y_c = (λ/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
     
     where F = 1 (constant, no random spreading).
     
@@ -272,11 +236,12 @@ def train_single_replica(
     W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
     X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
     
-    # Generate observations without F: Y = (1/√M) Σ_μ W X
+    # Generate observations: Y = (λ/√M) Σ_μ W X
     # Note: F=1, so no F factor
+    scale = lam / math.sqrt(M)
     W_sel = W_teacher[i_idx.long(), :]
     X_sel = X_teacher[:, j_idx.long()].T
-    Y = (1.0 / math.sqrt(M)) * (W_sel * X_sel).sum(dim=1)
+    Y = scale * (W_sel * X_sel).sum(dim=1)
     
     # Add noise
     torch.manual_seed(seed + 1000)
@@ -306,7 +271,7 @@ def train_single_replica(
         m_W, v_W, m_X, v_X, g_prev = gamp_step_with_onsager(
             m_W, v_W, m_X, v_X, m_W_prev, m_X_prev,
             Y_noisy, i_idx, j_idx, g_prev,
-            noise_var, damping, N1, N2, M
+            lam, noise_var, damping, N1, N2, M
         )
         
         m_W_prev = m_W_old
@@ -316,7 +281,7 @@ def train_single_replica(
         if step % 50 == 0 or step == max_steps - 1:
             W_sel = m_W[i_idx.long(), :]
             X_sel = m_X[:, j_idx.long()].T
-            Y_pred = (1.0 / math.sqrt(M)) * (W_sel * X_sel).sum(dim=1)
+            Y_pred = scale * (W_sel * X_sel).sum(dim=1)
             
             loss = ((Y_noisy - Y_pred) ** 2).mean().item()
             final_loss = loss

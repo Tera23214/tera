@@ -21,70 +21,13 @@ import math
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
 
-from .graph import BiregularGraph
-from .utils import normalize_to_unit_variance, compute_qy
+from terao_gamp_gaussian.graph import BiregularGraph
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy, f_input, g_out
 
 
 # ============================================================================
 # G-AMP Functions (Algorithm 2)
 # ============================================================================
-
-def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Input function for Gaussian prior (Eq. 178 in paper).
-    
-    For standard Gaussian prior N(0, 1):
-        f_input(Σ, T) = T / (Σ + 1)
-        f_input,II(Σ, T) = Σ / (Σ + 1) + T² / (Σ + 1)²
-    
-    Args:
-        Sigma: Inverse variance parameter (Σ)
-        T: Mean parameter (scaled)
-    
-    Returns:
-        m: Posterior mean = f_input(Σ, T)
-        v: Posterior second moment = f_input,II(Σ, T)
-    """
-    # Avoid division by zero
-    denom = 1.0 + Sigma
-    denom = torch.clamp(denom, min=1e-10)
-    
-    m = T / denom                           # f_input = T / (Σ + 1)
-    v = Sigma / denom + (T ** 2) / (denom ** 2)  # f_input,II = Σ/(Σ+1) + T²/(Σ+1)²
-    
-    return m, v
-
-
-def g_out(
-    omega: torch.Tensor,
-    y: torch.Tensor,
-    V: torch.Tensor,
-    noise_var: float = 1e-10,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Output function for Gaussian noise channel (Alg2.2).
-    
-    For additive Gaussian noise with variance sigma^2:
-        g = (y - omega) / (V + sigma^2)
-        dg/d_omega = -1 / (V + sigma^2)
-    
-    Args:
-        omega: Current prediction
-        y: Observed value
-        V: Variance estimate
-        noise_var: Noise variance (sigma^2)
-    
-    Returns:
-        g: Output function value
-        dg: Derivative of g w.r.t. omega
-    """
-    denom = V + noise_var
-    denom = torch.clamp(denom, min=1e-10)
-    
-    g = (y - omega) / denom
-    dg = -1.0 / denom
-    
-    return g, dg
 
 
 def gamp_step(
@@ -138,18 +81,18 @@ def gamp_step(
     # Main term: (λ/√M) Σ_μ m_W^t × m_X^t
     omega_main = scale * (W_sel * X_sel).sum(dim=1)  # (C,)
     
-    # Onsager correction (both W-side and X-side) with λ/√M scaling
-    # Formula: ω = main - (λ/√M) g^{t-1} Σ_j (v_j^t - (m_j^t)²) × Π_k m_k^t × m_k^{t-1}
+    # Onsager correction (both W-side and X-side) with λ²/M scaling
+    # Formula: ω = main - (λ²/M) g^{t-1} Σ_j (v_j^t - (m_j^t)²) × Π_k m_k^t × m_k^{t-1}
     
     # (v - m²) variance terms at time t - clamp to ensure non-negative
     var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)  # (C, M)
     var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)  # (C, M)
     
-    # W-side Onsager: -(λ/√M) g^{t-1} Σ_μ (v_X^t - (m_X^t)²) × m_W^t × m_W^{t-1}
-    onsager_W_side = scale * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
+    # W-side Onsager: -(λ²/M) g^{t-1} Σ_μ (v_X^t - (m_X^t)²) × m_W^t × m_W^{t-1}
+    onsager_W_side = scale_sq * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
     
-    # X-side Onsager: -(λ/√M) g^{t-1} Σ_μ (v_W^t - (m_W^t)²) × m_X^t × m_X^{t-1}
-    onsager_X_side = scale * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
+    # X-side Onsager: -(λ²/M) g^{t-1} Σ_μ (v_W^t - (m_W^t)²) × m_X^t × m_X^{t-1}
+    onsager_X_side = scale_sq * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
     
     # Combined omega with both Onsager terms
     omega = omega_main - g_prev * (onsager_W_side + onsager_X_side)  # (C,)
@@ -165,8 +108,8 @@ def gamp_step(
     
     g, dg = g_out(omega, Y, V, noise_var)  # (C,), (C,)
     
-    # Apply damping to g and clamp for stability
-    g = damping * g + (1 - damping) * g_prev
+    # Apply damping to g and clamp for stability (old-value biased)
+    g = damping * g_prev + (1 - damping) * g
     g = torch.clamp(g, min=-100.0, max=100.0)  # Prevent extreme g values
     
     # ========================================================================
@@ -174,45 +117,56 @@ def gamp_step(
     # ========================================================================
     
     # Update W messages
-    # Σ_W[i,μ] = Σ_c (λ/√M)² × (-∂g_c) × m_X[μ, j_c]²
-    # T_W[i,μ] = m_W[i,μ] + Σ_c (λ/√M) × g_c × m_X[μ, j_c]
+    # Σ_W⁻¹[i,μ] = Σ_c (λ²/M) × (-∂g_c) × m_X[μ, j_c]²
+    # Σ_W[i,μ] = 1 / Σ_W⁻¹[i,μ]
+    # sum_W[i,μ] = Σ_c (λ/√M) × g_c × m_X[μ, j_c]
+    # T_W[i,μ] = m_W[i,μ] + Σ_W[i,μ] × sum_W[i,μ]
     
-    Sigma_W = torch.zeros_like(m_W)
-    T_W = m_W.clone()
+    Sigma_W_denom = torch.zeros_like(m_W)
     
-    # Scatter add with λ scaling
     dg_expanded = scale_sq * (-dg).unsqueeze(1) * (X_sel ** 2)  # (C, M)
-    Sigma_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
+    Sigma_W_denom.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
     
+    Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
+    
+    sum_W = torch.zeros_like(m_W)
     g_expanded = scale * g.unsqueeze(1) * X_sel  # (C, M)
-    T_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
+    sum_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
+    
+    T_W = m_W + Sigma_W * sum_W
     
     # Apply f_input for W
-    m_W_new, v_W_new = f_input(torch.clamp(Sigma_W, min=1e-10), T_W)
+    m_W_new, v_W_new = f_input(Sigma_W, T_W)
     v_W_new = torch.clamp(v_W_new, min=1e-8, max=10.0)  # Stability clamp
     
     # Update X messages
-    # Σ_X[μ,j] = Σ_c (λ/√M)² × (-∂g_c) × m_W[i_c, μ]²
-    # T_X[μ,j] = m_X[μ,j] + Σ_c (λ/√M) × g_c × m_W[i_c, μ]
+    # Σ_X⁻¹[μ,j] = Σ_c (λ²/M) × (-∂g_c) × m_W[i_c, μ]²
+    # Σ_X[μ,j] = 1 / Σ_X⁻¹[μ,j]
+    # sum_X[μ,j] = Σ_c (λ/√M) × g_c × m_W[i_c, μ]
+    # T_X[μ,j] = m_X[μ,j] + Σ_X[μ,j] × sum_X[μ,j]
     
-    Sigma_X = torch.zeros_like(m_X)
-    T_X = m_X.clone()
+    Sigma_X_denom = torch.zeros_like(m_X)
     
     dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2)  # (C, M)
-    Sigma_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
+    Sigma_X_denom.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
     
+    Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
+    
+    sum_X = torch.zeros_like(m_X)
     g_expanded_X = scale * g.unsqueeze(1) * W_sel  # (C, M)
-    T_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
+    sum_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
+    
+    T_X = m_X + Sigma_X * sum_X
     
     # Apply f_input for X
-    m_X_new, v_X_new = f_input(torch.clamp(Sigma_X, min=1e-10), T_X)
+    m_X_new, v_X_new = f_input(Sigma_X, T_X)
     v_X_new = torch.clamp(v_X_new, min=1e-8, max=10.0)  # Stability clamp
     
-    # Apply damping to messages
-    m_W_new = damping * m_W_new + (1 - damping) * m_W
-    v_W_new = damping * v_W_new + (1 - damping) * v_W
-    m_X_new = damping * m_X_new + (1 - damping) * m_X
-    v_X_new = damping * v_X_new + (1 - damping) * v_X
+    # Apply damping to messages (old-value biased)
+    m_W_new = damping * m_W + (1 - damping) * m_W_new
+    v_W_new = damping * v_W + (1 - damping) * v_W_new
+    m_X_new = damping * m_X + (1 - damping) * m_X_new
+    v_X_new = damping * v_X + (1 - damping) * v_X_new
     
     return m_W_new, v_W_new, m_X_new, v_X_new, g
 

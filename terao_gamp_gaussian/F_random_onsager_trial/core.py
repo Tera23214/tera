@@ -15,34 +15,12 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.F_random_onsager_trial.true_biregular import TrueBiregularGraph
-from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy, f_input, g_out
 
 
 # ============================================================================
 # G-AMP Functions
 # ============================================================================
-
-def f_input(Sigma: torch.Tensor, T: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Input function for Gaussian prior."""
-    denom = 1.0 + Sigma
-    denom = torch.clamp(denom, min=1e-10)
-    m = T / denom
-    v = Sigma / denom + (T ** 2) / (denom ** 2)
-    return m, v
-
-
-def g_out(
-    omega: torch.Tensor,
-    y: torch.Tensor,
-    V: torch.Tensor,
-    noise_var: float = 1e-10,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Output function for Gaussian noise channel."""
-    denom = V + noise_var
-    denom = torch.clamp(denom, min=1e-10)
-    g = (y - omega) / denom
-    dg = -1.0 / denom
-    return g, dg
 
 
 def gamp_step_with_onsager(
@@ -90,7 +68,7 @@ def gamp_step_with_onsager(
     
     # Output function
     g, dg = g_out(omega, Y, V, noise_var)
-    g = damping * g + (1 - damping) * g_prev
+    g = damping * g_prev + (1 - damping) * g
     g = torch.clamp(g, min=-10.0, max=10.0)  # More aggressive clamp
     
     # ========================================================================
@@ -128,11 +106,11 @@ def gamp_step_with_onsager(
     m_X_new, v_X_new = f_input(torch.clamp(Sigma_X, min=1e-10), T_X)
     v_X_new = torch.clamp(v_X_new, min=1e-8, max=10.0)
     
-    # Apply damping
-    m_W_new = damping * m_W_new + (1 - damping) * m_W
-    v_W_new = damping * v_W_new + (1 - damping) * v_W
-    m_X_new = damping * m_X_new + (1 - damping) * m_X
-    v_X_new = damping * v_X_new + (1 - damping) * v_X
+    # Apply damping (old-value biased)
+    m_W_new = damping * m_W + (1 - damping) * m_W_new
+    v_W_new = damping * v_W + (1 - damping) * v_W_new
+    m_X_new = damping * m_X + (1 - damping) * m_X_new
+    v_X_new = damping * v_X + (1 - damping) * v_X_new
     
     return m_W_new, v_W_new, m_X_new, v_X_new, g
 
