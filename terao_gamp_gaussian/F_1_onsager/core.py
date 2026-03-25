@@ -88,13 +88,14 @@ def gamp_step_with_onsager(
     var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)  # (C, M)
     var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)  # (C, M)
     
-    # W-side Onsager: (λ²/M) g^{t-1} Σ_μ (v_X - m_X²) m_W m_W^{t-1}
+    # W-side Onsager: (λ²/M) Σ_μ (v_X - m_X²) m_W m_W^{t-1}
     onsager_W_side = scale_sq * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
     
-    # X-side Onsager: (λ²/M) g^{t-1} Σ_μ (v_W - m_W²) m_X m_X^{t-1}
+    # X-side Onsager: (λ²/M) Σ_μ (v_W - m_W²) m_X m_X^{t-1}
     onsager_X_side = scale_sq * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
     
     # Combined omega with Onsager correction
+    #omaga_main - g^{t-1} (onsager_W + onsager_X)
     omega = omega_main - g_prev * (onsager_W_side + onsager_X_side)  # (C,)
     
     # ========================================================================

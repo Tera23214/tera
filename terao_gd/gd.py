@@ -35,19 +35,19 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 1000   # Number of rows
-N2 = 1000   # Number of columns  
-M = 10      # Rank (hidden dimension)
+N1 = 3000   # Number of rows
+N2 = 3000   # Number of columns  
+M = 300      # Rank (hidden dimension)
 
 ALPHA_START =0.5
 ALPHA_STOP = 5.0
 ALPHA_STEP = 0.5
 
 MAX_STEPS = 3000
-LR_BASE = 0.01     # Base learning rate (calibrated for N=1000)
-LR = LR_BASE * (1e6 / (N1 * N2))  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
+LR_BASE = 0.1     # Base learning rate (calibrated for N=1000)
+LR = LR_BASE * (1e6 / (N1 * N2 *M))  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
 SEED = 42
-NUM_REPLICAS = 300   # Number of replicas per alpha
+NUM_REPLICAS = 30   # Number of replicas per alpha
 CONVERGENCE_THRESHOLD = 1e-6  # Early stopping threshold for loss
 
 # ============================================================================

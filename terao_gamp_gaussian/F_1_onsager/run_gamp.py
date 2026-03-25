@@ -25,19 +25,19 @@ from terao_gamp_gaussian.F_1_onsager.core import train_single_replica
 # Configuration
 # ============================================================================
 
-N1 = 1000
-N2 = 1000
-M = 10
+N1 = 3000
+N2 = 3000
+M = 300
 
 ALPHA_START = 0.5
-ALPHA_STOP = 5.0
+ALPHA_STOP = 3.0
 ALPHA_STEP = 0.5
 
 MAX_STEPS = 500
-DAMPING = 0.5
+DAMPING = 0.5       #damping=0の時、dampingの効果がなくなる
 NOISE_VAR = 1e-10
 SEED = 42
-NUM_REPLICAS = 10
+NUM_REPLICAS = 30
 CONVERGENCE_THRESHOLD = 1e-6
 
 # ============================================================================
