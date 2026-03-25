@@ -202,6 +202,24 @@ def gamp_step_with_onsager(
     return m_W_new, v_W_new, m_X_new, v_X_new, g
 
 
+def compute_observed_loss(
+    m_W: torch.Tensor,
+    m_X: torch.Tensor,
+    Y_obs: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """
+    Compute MSE on observed entries.
+    """
+    W_sel = m_W[i_idx.long(), :]
+    X_sel = m_X[:, j_idx.long()].T
+    Y_pred = scale * (W_sel * X_sel).sum(dim=1)
+
+    return ((Y_obs - Y_pred) ** 2).mean()
+
+
 def train_single_replica(
     alpha: float,
     device: torch.device,
@@ -214,7 +232,10 @@ def train_single_replica(
     noise_var: float = 1e-10,
     convergence_threshold: float = 1e-6,
     lam: float = 1.0,  # Signal strength λ
-) -> tuple[float, float, int]:
+    return_history: bool = False,
+    loss_eval_interval: int = 50,
+    early_stop: bool = True,
+) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
     Train a single replica using G-AMP with F = 1 and Onsager correction.
     
@@ -264,6 +285,8 @@ def train_single_replica(
     final_loss = 0.0
     steps_taken = max_steps
     prev_loss = float('inf')
+    history = {"steps": [], "loss": []}
+    history_loss_tensors = []
     
     for step in range(max_steps):
         m_W_old = m_W.clone()
@@ -278,19 +301,29 @@ def train_single_replica(
         m_W_prev = m_W_old
         m_X_prev = m_X_old
         
-        # Check convergence
-        if step % 50 == 0 or step == max_steps - 1:
-            W_sel = m_W[i_idx.long(), :]
-            X_sel = m_X[:, j_idx.long()].T
-            Y_pred = scale * (W_sel * X_sel).sum(dim=1)
-            
-            loss = ((Y_noisy - Y_pred) ** 2).mean().item()
-            final_loss = loss
-            
-            if abs(prev_loss - loss) < convergence_threshold:
-                steps_taken = step + 1
-                break
-            prev_loss = loss
+        # Check convergence and optionally record the full loss trace.
+        if step % loss_eval_interval == 0 or step == max_steps - 1:
+            loss_tensor = compute_observed_loss(
+                m_W, m_X, Y_noisy, i_idx, j_idx, scale
+            )
+
+            if return_history:
+                history["steps"].append(step + 1)
+                history_loss_tensors.append(loss_tensor.detach())
+
+            loss = None
+            if early_stop or not return_history or step == max_steps - 1:
+                loss = float(loss_tensor.item())
+                final_loss = loss
+
+            if early_stop:
+                if loss is None:
+                    loss = float(loss_tensor.item())
+                    final_loss = loss
+                if abs(prev_loss - loss) < convergence_threshold:
+                    steps_taken = step + 1
+                    break
+                prev_loss = loss
     
     # Normalize student matrices
     m_W = normalize_to_unit_variance(m_W)
@@ -299,4 +332,11 @@ def train_single_replica(
     # Compute Q_Y
     qy = compute_qy(m_W, m_X, W_teacher, X_teacher)
     
+    if return_history:
+        if history_loss_tensors:
+            history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
+            if not early_stop:
+                final_loss = float(history["loss"][-1])
+        return qy, final_loss, steps_taken, history
+
     return qy, final_loss, steps_taken
