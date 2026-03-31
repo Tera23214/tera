@@ -99,13 +99,20 @@ def save_config(results_dir: Path, args: argparse.Namespace, device: torch.devic
         yaml.dump(config, f, default_flow_style=False)
 
 
-def save_loss_history(results_dir: Path, steps: np.ndarray, all_losses: np.ndarray) -> None:
+def save_loss_history(
+    results_dir: Path,
+    steps: np.ndarray,
+    all_losses: np.ndarray,
+    all_qys: np.ndarray,
+) -> None:
     history_path = results_dir / "loss_history.csv"
     mean_loss = all_losses.mean(axis=0)
     std_loss = all_losses.std(axis=0)
     log_losses = np.log10(np.clip(all_losses, 1e-30, None))
     mean_log_loss = log_losses.mean(axis=0)
     std_log_loss = log_losses.std(axis=0)
+    mean_qy = all_qys.mean(axis=0)
+    std_qy = all_qys.std(axis=0)
 
     header = [
         "step",
@@ -113,8 +120,11 @@ def save_loss_history(results_dir: Path, steps: np.ndarray, all_losses: np.ndarr
         "loss_std",
         "log10_loss_mean",
         "log10_loss_std",
+        "qy_mean",
+        "qy_std",
     ]
-    header.extend([f"replica_{idx + 1}" for idx in range(all_losses.shape[0])])
+    header.extend([f"loss_replica_{idx + 1}" for idx in range(all_losses.shape[0])])
+    header.extend([f"qy_replica_{idx + 1}" for idx in range(all_qys.shape[0])])
 
     with open(history_path, "w") as f:
         f.write(",".join(header) + "\n")
@@ -125,8 +135,11 @@ def save_loss_history(results_dir: Path, steps: np.ndarray, all_losses: np.ndarr
                 f"{std_loss[step_idx]:.10e}",
                 f"{mean_log_loss[step_idx]:.10e}",
                 f"{std_log_loss[step_idx]:.10e}",
+                f"{mean_qy[step_idx]:.10e}",
+                f"{std_qy[step_idx]:.10e}",
             ]
             row.extend(f"{loss[step_idx]:.10e}" for loss in all_losses)
+            row.extend(f"{qy[step_idx]:.10e}" for qy in all_qys)
             f.write(",".join(row) + "\n")
 
 
@@ -240,6 +253,50 @@ def plot_log_loss(
     plt.close(fig)
 
 
+def plot_qy(
+    plots_dir: Path,
+    steps: np.ndarray,
+    all_qys: np.ndarray,
+    mean_qy: np.ndarray,
+    std_qy: np.ndarray,
+    args: argparse.Namespace,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    for idx, qy_curve in enumerate(all_qys):
+        ax.plot(
+            steps,
+            qy_curve,
+            color="#B0BEC5",
+            linewidth=1.2,
+            alpha=0.6,
+            label="Replica" if idx == 0 else None,
+        )
+
+    ax.plot(steps, mean_qy, color="#2E7D32", linewidth=2.5, label="Mean Q_Y")
+    ax.fill_between(
+        steps,
+        mean_qy - std_qy,
+        mean_qy + std_qy,
+        color="#A5D6A7",
+        alpha=0.35,
+        label="Mean ± std",
+    )
+
+    ax.set_xlabel("Step", fontsize=13)
+    ax.set_ylabel("Q_Y", fontsize=13)
+    ax.set_title(
+        f"Q_Y vs Step (alpha={args.alpha}, N1={args.N1}, N2={args.N2}, M={args.M}, "
+        f"{args.num_replicas} replicas)",
+        fontsize=14,
+    )
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=11)
+    plt.tight_layout()
+    plt.savefig(plots_dir / "qy_vs_step.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
     device = detect_device()
@@ -270,6 +327,7 @@ def main() -> None:
     save_config(results_dir, args, device)
 
     all_losses = []
+    all_qys = []
     qy_values = []
     final_losses = []
     runtimes = []
@@ -303,12 +361,14 @@ def main() -> None:
 
         runtime = time.time() - replica_start
         loss_history = np.asarray(history["loss"], dtype=np.float64)
+        qy_history = np.asarray(history["qy"], dtype=np.float64)
         step_history = np.asarray(history["steps"], dtype=np.int64)
         convergence_step = estimate_convergence_step(
             loss_history, args.convergence_threshold
         )
 
         all_losses.append(loss_history)
+        all_qys.append(qy_history)
         qy_values.append(qy)
         final_losses.append(final_loss)
         runtimes.append(runtime)
@@ -321,6 +381,7 @@ def main() -> None:
         print(
             f"Replica {replica_idx + 1}/{args.num_replicas}: "
             f"seed={seed}, final_loss={final_loss:.2e}, "
+            f"final_qy={qy:.4f}, "
             f"estimated_convergence_step={convergence_text}, "
             f"steps_recorded={steps_taken}, runtime={runtime:.1f}s"
         )
@@ -328,19 +389,23 @@ def main() -> None:
     total_runtime = time.time() - total_start
 
     all_losses_arr = np.asarray(all_losses, dtype=np.float64)
+    all_qys_arr = np.asarray(all_qys, dtype=np.float64)
     steps = step_history
     mean_loss = all_losses_arr.mean(axis=0)
     std_loss = all_losses_arr.std(axis=0)
     log_losses = np.log10(np.clip(all_losses_arr, 1e-30, None))
     mean_log_loss = log_losses.mean(axis=0)
     std_log_loss = log_losses.std(axis=0)
+    mean_qy = all_qys_arr.mean(axis=0)
+    std_qy = all_qys_arr.std(axis=0)
 
-    save_loss_history(results_dir, steps, all_losses_arr)
+    save_loss_history(results_dir, steps, all_losses_arr, all_qys_arr)
     save_replica_summary(
         results_dir, seeds, runtimes, final_losses, convergence_steps, qy_values
     )
     plot_linear_loss(plots_dir, steps, all_losses_arr, mean_loss, std_loss, args)
     plot_log_loss(plots_dir, steps, all_losses_arr, mean_log_loss, std_log_loss, args)
+    plot_qy(plots_dir, steps, all_qys_arr, mean_qy, std_qy, args)
 
     print()
     print(f"Mean final loss: {np.mean(final_losses):.2e}")
