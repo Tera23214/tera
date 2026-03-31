@@ -1,6 +1,6 @@
-M: 10
-N1: 30
-N2: 30
+M: 3
+N1: 8
+N2: 8
 algorithm: gamp_F_1_onsager_loss_vs_step
 alpha: 1.0
 beta_max: 0.5
@@ -11,7 +11,7 @@ damping_schedule: beta
 device: cpu
 early_stop: false
 loss_eval_interval: 1
-max_steps: 5
+max_steps: 3
 noise_var: 1.0e-10
 num_replicas: 1
 seed: 42
