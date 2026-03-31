@@ -25,13 +25,13 @@ from terao_gamp_gaussian.F_1_onsager.core import train_single_replica
 # Configuration
 # ============================================================================
 
-N1 = 3000
-N2 = 3000
+N1 = 1000
+N2 = 1000
 M = 300
 
 ALPHA_START = 0.5
 ALPHA_STOP = 3.0
-ALPHA_STEP = 0.5
+ALPHA_STEP = 0.1
 
 MAX_STEPS = 500
 DAMPING = 0.5       #damping=0の時、dampingの効果がなくなる

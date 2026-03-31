@@ -1,0 +1,16 @@
+F_type: constant_1
+M: 300
+N1: 1000
+N2: 1000
+algorithm: gamp_F_1_onsager
+alpha_start: 0.5
+alpha_step: 0.1
+alpha_stop: 3.0
+convergence_threshold: 1.0e-06
+damping: 0.5
+device: mps
+max_steps: 500
+noise_var: 1.0e-10
+num_replicas: 30
+onsager_correction: true
+seed: 42

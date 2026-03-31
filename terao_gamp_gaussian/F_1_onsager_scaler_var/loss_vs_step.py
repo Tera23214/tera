@@ -27,7 +27,7 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.F_1_onsager.core import train_single_replica
+from terao_gamp_gaussian.F_1_onsager_scaler_var.core import train_single_replica
 
 #set the parameters for the experiment
 def parse_args() -> argparse.Namespace:

@@ -1,12 +1,8 @@
 #!/usr/bin/env python
 """
-G-AMP Simulation Runner.
+G-AMP Simulation Runner with F=1 and Onsager Correction.
 
-Runs G-AMP algorithm for various alpha values and plots Q_Y vs alpha.
-Based on the structure of terao_gd/gd.py.
-
-Usage:
-    python terao_gamp/run_gamp.py
+Runs G-AMP algorithm with F = 1 (constant) and proper Onsager term for various alpha values.
 """
 
 import sys
@@ -19,29 +15,29 @@ import numpy as np
 import torch
 import yaml
 
-# Add parent directory to path
-repo_root = Path(__file__).resolve().parent.parent
+# Add parent directories to path
+repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.core import train_single_replica
+from terao_gamp_gaussian.F_1_onsager_scaler_var.core import train_single_replica
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-N1 = 1000   # Number of rows
-N2 = 1000   # Number of columns  
-M = 10      # Rank (hidden dimension)
+N1 = 1000
+N2 = 1000
+M = 300
 
 ALPHA_START = 0.5
-ALPHA_STOP = 5.0
-ALPHA_STEP = 0.5
+ALPHA_STOP = 3.0
+ALPHA_STEP = 0.1
 
-MAX_STEPS = 500         # G-AMP iterations
-DAMPING = 0.5           # Message damping
-NOISE_VAR = 1e-10       # Noise variance
+MAX_STEPS = 500
+DAMPING = 0.5       #damping=0の時、dampingの効果がなくなる
+NOISE_VAR = 1e-10
 SEED = 42
-NUM_REPLICAS = 10       # Number of replicas per alpha
+NUM_REPLICAS = 30
 CONVERGENCE_THRESHOLD = 1e-6
 
 # ============================================================================
@@ -50,7 +46,7 @@ CONVERGENCE_THRESHOLD = 1e-6
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("G-AMP - Generalized Approximate Message Passing")
+    print("G-AMP with F=1 + Onsager Correction")
     print("Sparse Matrix Factorization")
     print("=" * 60)
     
@@ -71,16 +67,16 @@ if __name__ == "__main__":
     print(f"Replicas per alpha: {NUM_REPLICAS}")
     print()
     
-    # Create results directory with timestamp
+    # Create results directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir_name = f"{timestamp}_gamp_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
+    results_dir_name = f"{timestamp}_gamp_F_1_onsager_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
     results_dir = Path(__file__).parent / "results" / results_dir_name
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"Results directory: {results_dir}")
     
     # Save configuration
     config = {
-        'algorithm': 'gamp',
+        'algorithm': 'gamp_F_1_onsager',
         'N1': N1,
         'N2': N2,
         'M': M,
@@ -94,6 +90,8 @@ if __name__ == "__main__":
         'num_replicas': NUM_REPLICAS,
         'convergence_threshold': CONVERGENCE_THRESHOLD,
         'device': str(device),
+        'onsager_correction': True,
+        'F_type': 'constant_1',  # F=1
     }
     config_path = results_dir / "config.yaml"
     with open(config_path, 'w') as f:
@@ -165,12 +163,9 @@ if __name__ == "__main__":
     print(f"\nTotal time: {total_time:.1f}s")
     print("=" * 60)
     
-    # Create plots subdirectory
+    # Create plots
     plots_dir = results_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
-    
-    # Plot Q_Y vs Alpha with error bars
-    print("\nGenerating plots...")
     
     alphas_list = sorted(results.keys())
     qy_means = [results[a]['qy_mean'] for a in alphas_list]
@@ -180,12 +175,12 @@ if __name__ == "__main__":
     fig, ax = plt.subplots(figsize=(10, 7))
     
     ax.errorbar(alphas_list, qy_means, yerr=qy_sems, 
-                fmt='o-', color='#E53935', markersize=6, linewidth=2,
+                fmt='o-', color='#1976D2', markersize=6, linewidth=2,
                 capsize=4, capthick=1.5, elinewidth=1.5,
-                label='G-AMP')
+                label='G-AMP (F=1 + Onsager)')
     ax.set_xlabel(r'$\alpha$ (observation density)', fontsize=14)
     ax.set_ylabel(r'$Q_Y$', fontsize=14)
-    ax.set_title(f'Phase Transition (G-AMP)\n({N1}×{N2}, M={M}, {MAX_STEPS} steps, {NUM_REPLICAS} replicas)', fontsize=16)
+    ax.set_title(f'Phase Transition (G-AMP with F=1 + Onsager)\n({N1}×{N2}, M={M}, {MAX_STEPS} steps)', fontsize=16)
     ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)
     ax.set_ylim(-0.05, 1.05)
     ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
@@ -195,7 +190,6 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     
-    # Save plot
     plot_path = plots_dir / "qy_vs_alpha.png"
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     print(f"Plot saved: {plot_path}")
