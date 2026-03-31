@@ -251,7 +251,7 @@ def main() -> None:
     print(f"alpha={args.alpha}, N1={args.N1}, N2={args.N2}, M={args.M}")
     if args.damping_schedule == "beta":
         print(
-            f"max_steps={args.max_steps}, damping schedule: beta=min(step*{args.beta_scale}, {args.beta_max})"
+            f"max_steps={args.max_steps}, damping schedule: beta=max(1-step*{args.beta_scale}, {args.beta_max})"
         )
     else:
         print(f"max_steps={args.max_steps}, damping={args.damping}")

@@ -233,13 +233,15 @@ def compute_step_damping(
     Compute damping factor for the current step.
 
     If use_step_damping is enabled:
-        beta(step) = min(step * beta_scale, beta_max)
+        beta(step) = max(1 - step * beta_scale, beta_max)
+    Starts at 1.0 (very gentle) and decreases, with beta_max as the
+    lower bound. Ensures damping never falls below beta_max.
     Otherwise use the fixed base_damping.
     """
     if not use_step_damping:
         damping_t = base_damping
     else:
-        damping_t = min(step * beta_scale, beta_max)
+        damping_t = max(1.0 - step * beta_scale, beta_max)
 
     # Keep damping in a numerically safe range.
     return float(max(0.0, min(1.0, damping_t)))
