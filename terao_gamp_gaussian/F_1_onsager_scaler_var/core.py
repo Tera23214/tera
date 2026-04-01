@@ -170,7 +170,7 @@ def gamp_step_with_onsager(
     
     # Note: F=1, so no F² factor
     dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2)
-    Sigma_X_denom.scatter_add_(1, j_idx_long.unsqueeze(0).expand(M, -1), dg_expanded_X.T)
+    Sigma_X_denom.scatter_add_(1, j_idx_long.unsqueeze(0).expand(M, -1), dg_expanded_X.T.contiguous())
     
     # Apply reciprocal for X
     Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
@@ -179,7 +179,7 @@ def gamp_step_with_onsager(
     # Note: F=1, so no F factor
     sum_X = torch.zeros_like(m_X)
     g_expanded_X = scale * g.unsqueeze(1) * W_sel
-    sum_X.scatter_add_(1, j_idx_long.unsqueeze(0).expand(M, -1), g_expanded_X.T)
+    sum_X.scatter_add_(1, j_idx_long.unsqueeze(0).expand(M, -1), g_expanded_X.T.contiguous())
 
     # T_X = m_X + Σ_X [sum_X - (λ²/M) chi_W m_X_prev Σ g(t) g(t-1)]
     T_X = m_X + Sigma_X * (sum_X - onsager_X.unsqueeze(0) * m_X_prev)
