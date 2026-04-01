@@ -25,9 +25,9 @@ from terao_gamp_gaussian.F_1_onsager_scaler_var.core import train_single_replica
 # Configuration
 # ============================================================================
 
-N1 = 3000
-N2 = 3000
-M = 300
+N1 = 2520
+N2 = 2520
+M = 200
 
 ALPHA_START = 0.5
 ALPHA_STOP = 3.0
