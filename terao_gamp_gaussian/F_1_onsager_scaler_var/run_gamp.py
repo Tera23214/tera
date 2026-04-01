@@ -25,8 +25,8 @@ from terao_gamp_gaussian.F_1_onsager_scaler_var.core import train_single_replica
 # Configuration
 # ============================================================================
 
-N1 = 1000
-N2 = 1000
+N1 = 3000
+N2 = 3000
 M = 300
 
 ALPHA_START = 0.5
@@ -34,7 +34,10 @@ ALPHA_STOP = 3.0
 ALPHA_STEP = 0.1
 
 MAX_STEPS = 500
-DAMPING = 0.5       #damping=0の時、dampingの効果がなくなる
+DAMPING = 0.5       # Lower bound for step damping, or fixed damping if disabled
+USE_STEP_DAMPING = True
+DAMPING_BETA_SCALE = 1e-3
+DAMPING_BETA_MAX = DAMPING
 NOISE_VAR = 1e-10
 SEED = 42
 NUM_REPLICAS = 30
@@ -63,7 +66,13 @@ if __name__ == "__main__":
     
     print(f"Matrix: {N1}×{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
-    print(f"Steps: {MAX_STEPS}, Damping: {DAMPING}")
+    if USE_STEP_DAMPING:
+        print(
+            f"Steps: {MAX_STEPS}, Damping schedule: "
+            f"beta=max(1-step*{DAMPING_BETA_SCALE}, {DAMPING_BETA_MAX})"
+        )
+    else:
+        print(f"Steps: {MAX_STEPS}, Damping: {DAMPING}")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
     print()
     
@@ -85,6 +94,9 @@ if __name__ == "__main__":
         'alpha_step': ALPHA_STEP,
         'max_steps': MAX_STEPS,
         'damping': DAMPING,
+        'use_step_damping': USE_STEP_DAMPING,
+        'damping_beta_scale': DAMPING_BETA_SCALE,
+        'damping_beta_max': DAMPING_BETA_MAX,
         'noise_var': NOISE_VAR,
         'seed': SEED,
         'num_replicas': NUM_REPLICAS,
@@ -124,6 +136,9 @@ if __name__ == "__main__":
                 M=M,
                 max_steps=MAX_STEPS,
                 damping=DAMPING,
+                use_step_damping=USE_STEP_DAMPING,
+                damping_beta_scale=DAMPING_BETA_SCALE,
+                damping_beta_max=DAMPING_BETA_MAX,
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
             )
