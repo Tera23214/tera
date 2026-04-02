@@ -121,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=max(1, os.cpu_count() or 1),
+        default=3,
         help="Number of parallel worker processes (default: CPU count).",
     )
     return parser.parse_args()
