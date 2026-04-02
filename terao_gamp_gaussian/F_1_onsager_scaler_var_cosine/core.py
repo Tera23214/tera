@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """
-G-AMP core module with F=1 and scalar-variance Onsager terms.
+G-AMP core module with F=1, scalar-variance Onsager terms, and
+cosine-similarity evaluation.
 
 Implements the G-AMP algorithm for sparse matrix factorization
 with F = 1 (constant) and Onsager correction using the scalar averages
@@ -21,7 +22,7 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.graph import BiregularGraph
-from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy, f_input, g_out
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, f_input, g_out
 
 
 # ============================================================================
@@ -256,7 +257,7 @@ def train_single_replica(
     convergence_threshold: float = 1e-6,
     lam: float = 1.0,  # Signal strength λ
     return_history: bool = False,
-    loss_eval_interval: int = 100,
+    loss_eval_interval: int = 50,
     early_stop: bool = True,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
@@ -293,6 +294,7 @@ def train_single_replica(
     noise = torch.randn_like(Y) * math.sqrt(noise_var)
     Y_noisy = Y + noise
     
+    # Initialize messages from the standard Gaussian prior, with v=1.0
     torch.manual_seed(seed + 2000)
     m_W = torch.randn(N1, M, device=device)
     v_W = torch.ones(N1, M, device=device)
@@ -307,9 +309,16 @@ def train_single_replica(
     final_loss = 0.0
     steps_taken = max_steps
     prev_loss = float('inf')
-    history = {"steps": [], "loss": [], "qy": [], "damping": []}
+    history = {
+        "steps": [],
+        "loss": [],
+        "loss_clean": [],
+        "cosine_similarity": [],
+        "damping": [],
+    }
     history_loss_tensors = []
-    history_qy_values = []
+    history_clean_loss_tensors = []
+    history_cosine_values = []
     
     for step in range(max_steps):
         # Keep references to time-t messages for the next Onsager memory term.
@@ -337,20 +346,26 @@ def train_single_replica(
         
         # Check convergence and optionally record the full loss trace.
         if step % loss_eval_interval == 0 or step == max_steps - 1:
+            m_W_eval = normalize_to_unit_variance(m_W)
+            m_X_eval = normalize_to_unit_variance(m_X)
             loss_tensor = compute_observed_loss(
-                m_W, m_X, Y_noisy, i_idx, j_idx, scale
+                m_W_eval, m_X_eval, Y_noisy, i_idx, j_idx, scale
+            )
+            clean_loss_tensor = compute_observed_loss(
+                m_W_eval, m_X_eval, Y, i_idx, j_idx, scale
             )
 
             if return_history:
-                qy_step = compute_qy(
-                    normalize_to_unit_variance(m_W),
-                    normalize_to_unit_variance(m_X),
+                cosine_similarity_step = compute_y_cosine_similarity(
+                    m_W_eval,
+                    m_X_eval,
                     W_teacher,
                     X_teacher,
                 )
                 history["steps"].append(step + 1)
                 history_loss_tensors.append(loss_tensor.detach())
-                history_qy_values.append(qy_step)
+                history_clean_loss_tensors.append(clean_loss_tensor.detach())
+                history_cosine_values.append(cosine_similarity_step)
                 history["damping"].append(damping_t)
 
             loss = None
@@ -371,15 +386,36 @@ def train_single_replica(
     m_W = normalize_to_unit_variance(m_W)
     m_X = normalize_to_unit_variance(m_X)
     
-    # Compute Q_Y
-    qy = compute_qy(m_W, m_X, W_teacher, X_teacher)
+    # Compute cosine similarity in Y-space
+    cosine_similarity = compute_y_cosine_similarity(m_W, m_X, W_teacher, X_teacher)
     
     if return_history:
         if history_loss_tensors:
             history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
-            history["qy"] = history_qy_values
+            history["loss_clean"] = torch.stack(history_clean_loss_tensors).cpu().tolist()
+            history["cosine_similarity"] = history_cosine_values
             if not early_stop:
                 final_loss = float(history["loss"][-1])
-        return qy, final_loss, steps_taken, history
+        return cosine_similarity, final_loss, steps_taken, history
 
-    return qy, final_loss, steps_taken
+    return cosine_similarity, final_loss, steps_taken
+def compute_y_cosine_similarity(
+    W_student: torch.Tensor,
+    X_student: torch.Tensor,
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+) -> float:
+    """
+    Compute cosine similarity between Y_teacher = W_teacher X_teacher and
+    Y_student = W_student X_student without materializing the dense Y matrices.
+    """
+    cross_w = W_teacher.T @ W_student
+    cross_x = X_student @ X_teacher.T
+    inner = torch.trace(cross_w @ cross_x)
+
+    teacher_norm_sq = torch.trace((W_teacher.T @ W_teacher) @ (X_teacher @ X_teacher.T))
+    student_norm_sq = torch.trace((W_student.T @ W_student) @ (X_student @ X_student.T))
+    denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
+
+    return (inner / denom).item()
+

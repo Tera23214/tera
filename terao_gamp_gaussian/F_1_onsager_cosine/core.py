@@ -1,14 +1,18 @@
 #!/usr/bin/env python
 """
-G-AMP core module with F=1 and scalar-variance Onsager terms.
+G-AMP (Generalized Approximate Message Passing) core module with F=1,
+Onsager correction, and cosine-similarity evaluation.
 
 Implements the G-AMP algorithm for sparse matrix factorization
-with F = 1 (constant) and Onsager correction using the scalar averages
+with F = 1 (constant) and proper Onsager correction.
 
-    chi_W = mean(v_W - m_W^2)
-    chi_X = mean(v_X - m_X^2)
+Observation model:
+    Y_obs = (λ/√M) Σ_μ W_{i,μ} X_{μ,j} + ΔZ
 
-instead of node-dependent variances.
+where F = 1 (constant, no spreading) and λ is the signal strength.
+
+The Onsager term corrects for the self-correlation in the iteration,
+which is critical for proper convergence in message passing algorithms.
 """
 
 import sys
@@ -21,7 +25,28 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.graph import BiregularGraph
-from terao_gamp_gaussian.utils import normalize_to_unit_variance, compute_qy, f_input, g_out
+from terao_gamp_gaussian.utils import normalize_to_unit_variance, f_input, g_out
+
+
+def compute_y_cosine_similarity(
+    W_student: torch.Tensor,
+    X_student: torch.Tensor,
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+) -> float:
+    """
+    Compute cosine similarity between Y_teacher = W_teacher X_teacher and
+    Y_student = W_student X_student without materializing the dense Y matrices.
+    """
+    cross_w = W_teacher.T @ W_student
+    cross_x = X_student @ X_teacher.T
+    inner = torch.trace(cross_w @ cross_x)
+
+    teacher_norm_sq = torch.trace((W_teacher.T @ W_teacher) @ (X_teacher @ X_teacher.T))
+    student_norm_sq = torch.trace((W_student.T @ W_student) @ (X_student @ X_student.T))
+    denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
+
+    return (inner / denom).item()
 
 
 # ============================================================================
@@ -48,7 +73,7 @@ def gamp_step_with_onsager(
     M: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Single G-AMP step with F = 1 and scalar-variance Onsager correction.
+    Single G-AMP step with F = 1 (constant) and proper Onsager correction.
     
     The observation model is:
         Y_c = (λ/√M) Σ_μ W_{i_c,μ} X_{μ,j_c}
@@ -56,55 +81,53 @@ def gamp_step_with_onsager(
     F = 1 for all edges and components (no random spreading).
     λ is the signal strength parameter.
     
-    Onsager correction uses the scalar averages
-
-        chi_W = mean(v_W - m_W^2)
-        chi_X = mean(v_X - m_X^2)
-
-    and applies the T-side correction through g(t) g(t-1).
+    Onsager Correction (following paper equations):
+        ω includes both W-side and X-side Onsager terms
+        T Onsager uses g (not dg) with time-t (v - m²)
     """
+    C = Y.shape[0]
     device = Y.device
-    i_idx_long = i_idx.long()
-    j_idx_long = j_idx.long()
-
-    scale = lam / math.sqrt(M)
-    scale_sq = (lam ** 2) / M
-
+    
+    scale = lam / math.sqrt(M)        # λ/√M
+    scale_sq = (lam ** 2) / M         # (λ/√M)² = λ²/M
+    
     # ========================================================================
-    # Step 1: Compute omega with scalar chi Onsager correction
+    # Step 1: Compute omega with Onsager correction
     # ========================================================================
-
-    W_sel = m_W[i_idx_long, :]        # (C, M)
-    X_sel = m_X[:, j_idx_long].T      # (C, M)
-
-    # Scalar approximation to v - m^2. Clamp keeps the effective variance
-    # non-negative, matching the stability treatment used in the base code.
-    chi_W = torch.clamp(v_W - m_W ** 2, min=0.0).mean()
-    chi_X = torch.clamp(v_X - m_X ** 2, min=0.0).mean()
-
-    row_cross_W = (m_W * m_W_prev).sum(dim=1)  # (N1,)
-    col_cross_X = (m_X * m_X_prev).sum(dim=0)  # (N2,)
-    row_sq_W = (m_W ** 2).sum(dim=1)           # (N1,)
-    col_sq_X = (m_X ** 2).sum(dim=0)           # (N2,)
-
-    # ω_c = (λ/√M) Σ_μ m_W m_X
-    #       - g_prev[c] (λ²/M) [chi_X Σ_μ m_W m_W_prev + chi_W Σ_μ m_X m_X_prev]
-    omega = scale * (W_sel * X_sel).sum(dim=1) - g_prev * scale_sq * (
-        chi_X * row_cross_W[i_idx_long] + chi_W * col_cross_X[j_idx_long]
-    )
-
+    
+    W_sel = m_W[i_idx.long(), :]      # (C, M)
+    X_sel = m_X[:, j_idx.long()].T    # (C, M)
+    vW_sel = v_W[i_idx.long(), :]     # (C, M)
+    vX_sel = v_X[:, j_idx.long()].T   # (C, M)
+    W_prev_sel = m_W_prev[i_idx.long(), :]    # (C, M)
+    X_prev_sel = m_X_prev[:, j_idx.long()].T  # (C, M)
+    
+    # Main term: ω_main = (λ/√M) Σ_μ m_W × m_X
+    # Note: F=1, so no F factor
+    omega_main = scale * (W_sel * X_sel).sum(dim=1)  # (C,)
+    
+    # (v - m²) at time t - clamp to ensure non-negative (can be negative due to v clamping)
+    var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)  # (C, M)
+    var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)  # (C, M)
+    
+    # W-side Onsager: (λ²/M) Σ_μ (v_X - m_X²) m_W m_W^{t-1}
+    onsager_W_side = scale_sq * (var_term_X * W_sel * W_prev_sel).sum(dim=1)  # (C,)
+    
+    # X-side Onsager: (λ²/M) Σ_μ (v_W - m_W²) m_X m_X^{t-1}
+    onsager_X_side = scale_sq * (var_term_W * X_sel * X_prev_sel).sum(dim=1)  # (C,)
+    
+    # Combined omega with Onsager correction
+    #omaga_main - g^{t-1} (onsager_W + onsager_X)
+    omega = omega_main - g_prev * (onsager_W_side + onsager_X_side)  # (C,)
+    
     # ========================================================================
-    # Step 2: Compute V with scalar chi approximation
+    # Step 2: Compute V
     # ========================================================================
-
-    # Since v_W ≈ m_W^2 + chi_W and v_X ≈ m_X^2 + chi_X,
-    # v_W v_X - m_W^2 m_X^2 ≈ chi_W chi_X + chi_X m_W^2 + chi_W m_X^2.
-    V = scale_sq * (
-        M * chi_W * chi_X
-        + chi_X * row_sq_W[i_idx_long]
-        + chi_W * col_sq_X[j_idx_long]
-    )
-    V = torch.clamp(V, min=1e-10)
+    
+    # V = (λ²/M) Σ_μ (v_W × v_X - m_W² × m_X²)
+    # Note: F=1, so no F² factor
+    V = scale_sq * (vW_sel * vX_sel - (W_sel ** 2) * (X_sel ** 2)).sum(dim=1)
+    V = torch.clamp(V, min=1e-10)  # Ensure positive
     
     # ========================================================================
     # Step 3: Output function
@@ -118,18 +141,26 @@ def gamp_step_with_onsager(
     
     # ========================================================================
     # Step 4: Compute T Onsager correction coefficients
-    # Uses g(t) g(t-1) together with the scalar chi approximation.
+    # Uses node-dependent (v - m^2) together with g(t) g(t-1).
     # ========================================================================
 
-    g_pair = g * g_prev  # (C,)
+    g_pair = g * g_prev
 
-    onsager_W = torch.zeros(N1, device=device, dtype=m_W.dtype)
-    onsager_W.scatter_add_(0, i_idx_long, g_pair)
-    onsager_W = scale_sq * chi_X * onsager_W  # (N1,)
-
-    onsager_X = torch.zeros(N2, device=device, dtype=m_X.dtype)
-    onsager_X.scatter_add_(0, j_idx_long, g_pair)
-    onsager_X = scale_sq * chi_W * onsager_X  # (N2,)
+    # Onsager for W: (λ²/M) g(t) g(t-1) × (v_X^t - m_X^{t,2})
+    # Note: m_W^{t-1} is multiplied later in T_W calculation
+    onsager_W_contrib = scale_sq * g_pair.unsqueeze(1) * var_term_X  # (C, M)
+    onsager_W = torch.zeros_like(m_W)
+    onsager_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), onsager_W_contrib)
+    
+    # Onsager for X: (λ²/M) g(t) g(t-1) × (v_W^t - m_W^{t,2})
+    # Note: m_X^{t-1} is multiplied later in T_X calculation
+    onsager_X_contrib = scale_sq * g_pair.unsqueeze(1) * var_term_W  # (C, M)
+    onsager_X = torch.zeros_like(m_X)
+    onsager_X.scatter_add_(
+        1,
+        j_idx.long().unsqueeze(0).expand(M, -1),
+        onsager_X_contrib.T.contiguous(),
+    )
     
     # ========================================================================
     # Step 5: Update Sigma, T with Onsager correction
@@ -147,7 +178,7 @@ def gamp_step_with_onsager(
     # Denominator: (λ²/M) × (-∂g_c) × m_X²
     # Note: F=1, so no F² factor
     dg_expanded = scale_sq * (-dg).unsqueeze(1) * (X_sel ** 2)  # (C, M)
-    Sigma_W_denom.scatter_add_(0, i_idx_long.unsqueeze(1).expand(-1, M), dg_expanded)
+    Sigma_W_denom.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), dg_expanded)
     
     # Apply reciprocal: Σ = 1 / denominator
     Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
@@ -156,10 +187,11 @@ def gamp_step_with_onsager(
     # Note: F=1, so no F factor
     sum_W = torch.zeros_like(m_W)
     g_expanded = scale * g.unsqueeze(1) * X_sel  # (C, M)
-    sum_W.scatter_add_(0, i_idx_long.unsqueeze(1).expand(-1, M), g_expanded)
-
-    # T_W = m_W + Σ_W [sum_W - (λ²/M) chi_X m_W_prev Σ g(t) g(t-1)]
-    T_W = m_W + Sigma_W * (sum_W - onsager_W.unsqueeze(1) * m_W_prev)
+    sum_W.scatter_add_(0, i_idx.long().unsqueeze(1).expand(-1, M), g_expanded)
+    
+    # T = m + Σ × (sum - Onsager × m_prev)
+    # where Onsager = (λ²/M) g(t) g(t-1) (v_X - m_X²)
+    T_W = m_W + Sigma_W * (sum_W - onsager_W * m_W_prev)
     
     # Apply f_input for W
     m_W_new, v_W_new = f_input(Sigma_W, T_W)
@@ -170,7 +202,11 @@ def gamp_step_with_onsager(
     
     # Note: F=1, so no F² factor
     dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2)
-    Sigma_X_denom.scatter_add_(1, j_idx_long.unsqueeze(0).expand(M, -1), dg_expanded_X.T.contiguous())
+    Sigma_X_denom.scatter_add_(
+        1,
+        j_idx.long().unsqueeze(0).expand(M, -1),
+        dg_expanded_X.T.contiguous(),
+    )
     
     # Apply reciprocal for X
     Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
@@ -179,10 +215,15 @@ def gamp_step_with_onsager(
     # Note: F=1, so no F factor
     sum_X = torch.zeros_like(m_X)
     g_expanded_X = scale * g.unsqueeze(1) * W_sel
-    sum_X.scatter_add_(1, j_idx_long.unsqueeze(0).expand(M, -1), g_expanded_X.T.contiguous())
-
-    # T_X = m_X + Σ_X [sum_X - (λ²/M) chi_W m_X_prev Σ g(t) g(t-1)]
-    T_X = m_X + Sigma_X * (sum_X - onsager_X.unsqueeze(0) * m_X_prev)
+    sum_X.scatter_add_(
+        1,
+        j_idx.long().unsqueeze(0).expand(M, -1),
+        g_expanded_X.T.contiguous(),
+    )
+    
+    # T = m + Σ × (sum - Onsager × m_prev)
+    # where Onsager = (λ²/M) g(t) g(t-1) (v_W - m_W²)
+    T_X = m_X + Sigma_X * (sum_X - onsager_X * m_X_prev)
     
     # Apply f_input for X
     m_X_new, v_X_new = f_input(Sigma_X, T_X)
@@ -256,7 +297,7 @@ def train_single_replica(
     convergence_threshold: float = 1e-6,
     lam: float = 1.0,  # Signal strength λ
     return_history: bool = False,
-    loss_eval_interval: int = 100,
+    loss_eval_interval: int = 50,
     early_stop: bool = True,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
@@ -293,6 +334,7 @@ def train_single_replica(
     noise = torch.randn_like(Y) * math.sqrt(noise_var)
     Y_noisy = Y + noise
     
+    # Initialize messages from the standard Gaussian prior, with v=1.0
     torch.manual_seed(seed + 2000)
     m_W = torch.randn(N1, M, device=device)
     v_W = torch.ones(N1, M, device=device)
@@ -307,9 +349,9 @@ def train_single_replica(
     final_loss = 0.0
     steps_taken = max_steps
     prev_loss = float('inf')
-    history = {"steps": [], "loss": [], "qy": [], "damping": []}
+    history = {"steps": [], "loss": [], "cosine_similarity": [], "damping": []}
     history_loss_tensors = []
-    history_qy_values = []
+    history_cosine_values = []
     
     for step in range(max_steps):
         # Keep references to time-t messages for the next Onsager memory term.
@@ -337,20 +379,22 @@ def train_single_replica(
         
         # Check convergence and optionally record the full loss trace.
         if step % loss_eval_interval == 0 or step == max_steps - 1:
+            m_W_eval = normalize_to_unit_variance(m_W)
+            m_X_eval = normalize_to_unit_variance(m_X)
             loss_tensor = compute_observed_loss(
-                m_W, m_X, Y_noisy, i_idx, j_idx, scale
+                m_W_eval, m_X_eval, Y_noisy, i_idx, j_idx, scale
             )
 
             if return_history:
-                qy_step = compute_qy(
-                    normalize_to_unit_variance(m_W),
-                    normalize_to_unit_variance(m_X),
+                cosine_similarity_step = compute_y_cosine_similarity(
+                    m_W_eval,
+                    m_X_eval,
                     W_teacher,
                     X_teacher,
                 )
                 history["steps"].append(step + 1)
                 history_loss_tensors.append(loss_tensor.detach())
-                history_qy_values.append(qy_step)
+                history_cosine_values.append(cosine_similarity_step)
                 history["damping"].append(damping_t)
 
             loss = None
@@ -371,15 +415,17 @@ def train_single_replica(
     m_W = normalize_to_unit_variance(m_W)
     m_X = normalize_to_unit_variance(m_X)
     
-    # Compute Q_Y
-    qy = compute_qy(m_W, m_X, W_teacher, X_teacher)
+    # Compute cosine similarity in Y-space
+    cosine_similarity = compute_y_cosine_similarity(
+        m_W, m_X, W_teacher, X_teacher
+    )
     
     if return_history:
         if history_loss_tensors:
             history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
-            history["qy"] = history_qy_values
+            history["cosine_similarity"] = history_cosine_values
             if not early_stop:
                 final_loss = float(history["loss"][-1])
-        return qy, final_loss, steps_taken, history
+        return cosine_similarity, final_loss, steps_taken, history
 
-    return qy, final_loss, steps_taken
+    return cosine_similarity, final_loss, steps_taken
