@@ -35,9 +35,9 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 3000   # Number of rows
-N2 = 3000   # Number of columns  
-M = 300      # Rank (hidden dimension)
+N1 = 220   # Number of rows
+N2 = 220   # Number of columns  
+M = 200      # Rank (hidden dimension)
 
 ALPHA_START =0.5
 ALPHA_STOP = 5.0

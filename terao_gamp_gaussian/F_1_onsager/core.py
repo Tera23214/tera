@@ -345,14 +345,16 @@ def train_single_replica(
         
         # Check convergence and optionally record the full loss trace.
         if step % loss_eval_interval == 0 or step == max_steps - 1:
+            m_W_eval = normalize_to_unit_variance(m_W)
+            m_X_eval = normalize_to_unit_variance(m_X)
             loss_tensor = compute_observed_loss(
-                m_W, m_X, Y_noisy, i_idx, j_idx, scale
+                m_W_eval, m_X_eval, Y_noisy, i_idx, j_idx, scale
             )
 
             if return_history:
                 qy_step = compute_qy(
-                    normalize_to_unit_variance(m_W),
-                    normalize_to_unit_variance(m_X),
+                    m_W_eval,
+                    m_X_eval,
                     W_teacher,
                     X_teacher,
                 )
