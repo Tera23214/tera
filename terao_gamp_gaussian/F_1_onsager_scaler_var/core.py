@@ -293,11 +293,11 @@ def train_single_replica(
     noise = torch.randn_like(Y) * math.sqrt(noise_var)
     Y_noisy = Y + noise
     
-    # Initialize messages: m~N(0, 0.1) small to ensure V > 0, v=1.0
+    # Initialize messages from the standard Gaussian prior, with v=1.0
     torch.manual_seed(seed + 2000)
-    m_W = torch.randn(N1, M, device=device) * 0.1  # Small init
+    m_W = torch.randn(N1, M, device=device)
     v_W = torch.ones(N1, M, device=device)
-    m_X = torch.randn(M, N2, device=device) * 0.1  # Small init
+    m_X = torch.randn(M, N2, device=device)
     v_X = torch.ones(M, N2, device=device)
     g_prev = torch.zeros(E, device=device)
     

@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--N1", type=int, default=1000)
     parser.add_argument("--N2", type=int, default=1000)
-    parser.add_argument("--M", type=int, default=300)
+    parser.add_argument("--M", type=int, default=200)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--damping", type=float, default=0.5)
     parser.add_argument(

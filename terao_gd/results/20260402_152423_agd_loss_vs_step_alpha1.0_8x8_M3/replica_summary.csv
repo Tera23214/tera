@@ -1,0 +1,2 @@
+replica,seed,runtime_sec,initial_loss,final_loss,final_mse,estimated_convergence_step,qy
+1,42,0.1548,1.4261117554e+02,7.8228796387e+02,1.0865111351e+01,,-4.1918075085e-01

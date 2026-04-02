@@ -210,10 +210,10 @@ def train_single_replica(
     # Generate Y (observations)
     Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
     
-    # Initialize student randomly
+    # Initialize student randomly from the standard Gaussian prior
     torch.manual_seed(seed + 2000)
-    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
-    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
+    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32)
     
     # Alternating Gradient Descent loop with early stopping
     final_loss = 0.0
