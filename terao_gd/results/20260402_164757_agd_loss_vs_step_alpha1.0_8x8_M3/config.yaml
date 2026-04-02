@@ -1,0 +1,14 @@
+M: 3
+N1: 8
+N2: 8
+algorithm: agd_loss_vs_step
+alpha: 1.0
+convergence_threshold: 1.0e-06
+device: cpu
+lr: 520.8333333333334
+lr_base: 0.1
+max_steps: 3
+num_replicas: 1
+record_interval: 1
+seed: 42
+student_init: standard_normal

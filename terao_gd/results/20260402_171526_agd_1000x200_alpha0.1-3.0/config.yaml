@@ -1,0 +1,14 @@
+M: 200
+N1: 1000
+N2: 1000
+algorithm: agd
+alpha_start: 0.1
+alpha_step: 0.2
+alpha_stop: 3.0
+convergence_threshold: 1.0e-06
+device: mps
+lr: 0.0005
+lr_base: 0.1
+max_steps: 3000
+num_replicas: 20
+seed: 42

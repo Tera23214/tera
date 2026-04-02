@@ -107,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--N1", type=int, default=1000)
     parser.add_argument("--N2", type=int, default=1000)
     parser.add_argument("--M", type=int, default=200)
-    parser.add_argument("--max-steps", type=int, default=3000)
+    parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument(
         "--lr",
         type=float,
@@ -115,6 +115,7 @@ def parse_args() -> argparse.Namespace:
         help="Learning rate. Defaults to gd.py-style auto scaling.",
     )
     parser.add_argument("--lr-base", type=float, default=0.1)
+    parser.add_argument("--noise-var", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-replicas", type=int, default=3)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
@@ -160,6 +161,7 @@ def save_config(
         "max_steps": args.max_steps,
         "lr": lr,
         "lr_base": args.lr_base,
+        "noise_var": args.noise_var,
         "seed": args.seed,
         "num_replicas": args.num_replicas,
         "convergence_threshold": args.convergence_threshold,
@@ -177,6 +179,7 @@ def save_loss_history(
     steps: np.ndarray,
     all_losses: np.ndarray,
     all_mses: np.ndarray,
+    all_qys: np.ndarray,
 ) -> None:
     history_path = results_dir / "loss_history.csv"
     mean_loss = all_losses.mean(axis=0)
@@ -186,6 +189,8 @@ def save_loss_history(
     log_losses = np.log10(np.clip(all_losses, 1e-30, None))
     mean_log_loss = log_losses.mean(axis=0)
     std_log_loss = log_losses.std(axis=0)
+    mean_qy = all_qys.mean(axis=0)
+    std_qy = all_qys.std(axis=0)
 
     header = [
         "step",
@@ -195,9 +200,12 @@ def save_loss_history(
         "log10_loss_std",
         "mse_mean",
         "mse_std",
+        "qy_mean",
+        "qy_std",
     ]
     header.extend([f"loss_replica_{idx + 1}" for idx in range(all_losses.shape[0])])
     header.extend([f"mse_replica_{idx + 1}" for idx in range(all_mses.shape[0])])
+    header.extend([f"qy_replica_{idx + 1}" for idx in range(all_qys.shape[0])])
 
     with open(history_path, "w") as f:
         f.write(",".join(header) + "\n")
@@ -210,9 +218,12 @@ def save_loss_history(
                 f"{std_log_loss[step_idx]:.10e}",
                 f"{mean_mse[step_idx]:.10e}",
                 f"{std_mse[step_idx]:.10e}",
+                f"{mean_qy[step_idx]:.10e}",
+                f"{std_qy[step_idx]:.10e}",
             ]
             row.extend(f"{loss_curve[step_idx]:.10e}" for loss_curve in all_losses)
             row.extend(f"{mse_curve[step_idx]:.10e}" for mse_curve in all_mses)
+            row.extend(f"{qy_curve[step_idx]:.10e}" for qy_curve in all_qys)
             f.write(",".join(row) + "\n")
 
 
@@ -332,6 +343,50 @@ def plot_log_loss(
     plt.close(fig)
 
 
+def plot_qy(
+    plots_dir: Path,
+    steps: np.ndarray,
+    all_qys: np.ndarray,
+    mean_qy: np.ndarray,
+    std_qy: np.ndarray,
+    args: argparse.Namespace,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    for idx, qy_curve in enumerate(all_qys):
+        ax.plot(
+            steps,
+            qy_curve,
+            color="#B0BEC5",
+            linewidth=1.2,
+            alpha=0.6,
+            label="Replica" if idx == 0 else None,
+        )
+
+    ax.plot(steps, mean_qy, color="#2E7D32", linewidth=2.5, label="Mean Q_Y")
+    ax.fill_between(
+        steps,
+        mean_qy - std_qy,
+        mean_qy + std_qy,
+        color="#A5D6A7",
+        alpha=0.35,
+        label="Mean +- std",
+    )
+
+    ax.set_xlabel("Step", fontsize=13)
+    ax.set_ylabel("Q_Y", fontsize=13)
+    ax.set_title(
+        f"AGD Q_Y vs Step (alpha={args.alpha}, N1={args.N1}, N2={args.N2}, M={args.M}, "
+        f"{args.num_replicas} replicas)",
+        fontsize=14,
+    )
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=11)
+    plt.tight_layout()
+    plt.savefig(plots_dir / "qy_vs_step.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def run_single_replica_with_history(
     alpha: float,
     device: torch.device,
@@ -341,6 +396,7 @@ def run_single_replica_with_history(
     M: int,
     max_steps: int,
     lr: float,
+    noise_var: float,
     record_interval: int,
 ) -> tuple[float, dict[str, list[float]]]:
     torch.manual_seed(seed)
@@ -354,6 +410,9 @@ def run_single_replica_with_history(
         return 0.0, history
 
     Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
+    torch.manual_seed(seed + 1000)
+    noise = torch.randn_like(Y) * math.sqrt(noise_var)
+    Y_noisy = Y + noise
 
     torch.manual_seed(seed + 2000)
     W_hat = torch.randn(N1, M, device=device, dtype=torch.float32)
@@ -362,19 +421,23 @@ def run_single_replica_with_history(
     history_steps: list[int] = []
     history_losses: list[float] = []
     history_mses: list[float] = []
+    history_qys: list[float] = []
 
     def record(step: int, W_curr: torch.Tensor, X_curr: torch.Tensor) -> None:
         Y_pred = compute_predictions(W_curr, X_curr, i_idx, j_idx, M)
-        residual = Y - Y_pred
+        residual = Y_noisy - Y_pred
+        W_eval = normalize_to_unit_variance(W_curr)
+        X_eval = normalize_to_unit_variance(X_curr)
         history_steps.append(step)
-        history_losses.append(float(compute_loss(Y, Y_pred, M).item()))
+        history_losses.append(float(compute_loss(Y_noisy, Y_pred, M).item()))
         history_mses.append(float((residual ** 2).mean().item()))
+        history_qys.append(compute_qy(W_eval, X_eval, W_teacher, X_teacher))
 
     record(0, W_hat, X_hat)
 
     for step in range(1, max_steps + 1):
-        W_hat = agd_step_W(W_hat, X_hat, Y, i_idx, j_idx, lr)
-        X_hat = agd_step_X(W_hat, X_hat, Y, i_idx, j_idx, lr)
+        W_hat = agd_step_W(W_hat, X_hat, Y_noisy, i_idx, j_idx, lr)
+        X_hat = agd_step_X(W_hat, X_hat, Y_noisy, i_idx, j_idx, lr)
 
         W_hat = normalize_to_unit_variance(W_hat)
         X_hat = normalize_to_unit_variance(X_hat)
@@ -383,7 +446,12 @@ def run_single_replica_with_history(
             record(step, W_hat, X_hat)
 
     qy = compute_qy(W_hat, X_hat, W_teacher, X_teacher)
-    history = {"steps": history_steps, "loss": history_losses, "mse": history_mses}
+    history = {
+        "steps": history_steps,
+        "loss": history_losses,
+        "mse": history_mses,
+        "qy": history_qys,
+    }
     return qy, history
 
 
@@ -397,7 +465,10 @@ def main() -> None:
     print("=" * 60)
     print(f"Device: {device}")
     print(f"alpha={args.alpha}, N1={args.N1}, N2={args.N2}, M={args.M}")
-    print(f"max_steps={args.max_steps}, lr={lr:.6e}, record_interval={args.record_interval}")
+    print(
+        f"max_steps={args.max_steps}, lr={lr:.6e}, "
+        f"noise_var={args.noise_var:.6e}, record_interval={args.record_interval}"
+    )
     print(f"replicas={args.num_replicas}, seed={args.seed}")
     print()
 
@@ -414,6 +485,7 @@ def main() -> None:
 
     all_losses = []
     all_mses = []
+    all_qys = []
     seeds = []
     runtimes = []
     initial_losses = []
@@ -437,6 +509,7 @@ def main() -> None:
             M=args.M,
             max_steps=args.max_steps,
             lr=lr,
+            noise_var=args.noise_var,
             record_interval=args.record_interval,
         )
 
@@ -444,9 +517,11 @@ def main() -> None:
         steps = np.asarray(history["steps"], dtype=np.int64)
         loss_history = np.asarray(history["loss"], dtype=np.float64)
         mse_history = np.asarray(history["mse"], dtype=np.float64)
+        qy_history = np.asarray(history["qy"], dtype=np.float64)
 
         all_losses.append(loss_history)
         all_mses.append(mse_history)
+        all_qys.append(qy_history)
         seeds.append(seed)
         runtimes.append(runtime)
         initial_losses.append(float(loss_history[0]))
@@ -475,12 +550,15 @@ def main() -> None:
 
     all_losses_arr = np.asarray(all_losses, dtype=np.float64)
     all_mses_arr = np.asarray(all_mses, dtype=np.float64)
+    all_qys_arr = np.asarray(all_qys, dtype=np.float64)
     mean_loss = all_losses_arr.mean(axis=0)
     std_loss = all_losses_arr.std(axis=0)
     mean_log_loss = np.log10(np.clip(all_losses_arr, 1e-30, None)).mean(axis=0)
     std_log_loss = np.log10(np.clip(all_losses_arr, 1e-30, None)).std(axis=0)
+    mean_qy = all_qys_arr.mean(axis=0)
+    std_qy = all_qys_arr.std(axis=0)
 
-    save_loss_history(results_dir, steps, all_losses_arr, all_mses_arr)
+    save_loss_history(results_dir, steps, all_losses_arr, all_mses_arr, all_qys_arr)
     save_replica_summary(
         results_dir,
         seeds,
@@ -493,6 +571,7 @@ def main() -> None:
     )
     plot_linear_loss(plots_dir, steps, all_losses_arr, mean_loss, std_loss, args)
     plot_log_loss(plots_dir, steps, all_losses_arr, mean_log_loss, std_log_loss, args)
+    plot_qy(plots_dir, steps, all_qys_arr, mean_qy, std_qy, args)
 
     print()
     print(f"Mean initial loss: {np.mean(initial_losses):.2e}")

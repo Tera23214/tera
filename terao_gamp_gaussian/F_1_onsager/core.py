@@ -134,7 +134,11 @@ def gamp_step_with_onsager(
     # Note: m_X^{t-1} is multiplied later in T_X calculation
     onsager_X_contrib = scale_sq * g_pair.unsqueeze(1) * var_term_W  # (C, M)
     onsager_X = torch.zeros_like(m_X)
-    onsager_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), onsager_X_contrib.T)
+    onsager_X.scatter_add_(
+        1,
+        j_idx.long().unsqueeze(0).expand(M, -1),
+        onsager_X_contrib.T.contiguous(),
+    )
     
     # ========================================================================
     # Step 5: Update Sigma, T with Onsager correction
@@ -176,7 +180,11 @@ def gamp_step_with_onsager(
     
     # Note: F=1, so no F² factor
     dg_expanded_X = scale_sq * (-dg).unsqueeze(1) * (W_sel ** 2)
-    Sigma_X_denom.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), dg_expanded_X.T)
+    Sigma_X_denom.scatter_add_(
+        1,
+        j_idx.long().unsqueeze(0).expand(M, -1),
+        dg_expanded_X.T.contiguous(),
+    )
     
     # Apply reciprocal for X
     Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
@@ -185,7 +193,11 @@ def gamp_step_with_onsager(
     # Note: F=1, so no F factor
     sum_X = torch.zeros_like(m_X)
     g_expanded_X = scale * g.unsqueeze(1) * W_sel
-    sum_X.scatter_add_(1, j_idx.long().unsqueeze(0).expand(M, -1), g_expanded_X.T)
+    sum_X.scatter_add_(
+        1,
+        j_idx.long().unsqueeze(0).expand(M, -1),
+        g_expanded_X.T.contiguous(),
+    )
     
     # T = m + Σ × (sum - Onsager × m_prev)
     # where Onsager = (λ²/M) g(t) g(t-1) (v_W - m_W²)

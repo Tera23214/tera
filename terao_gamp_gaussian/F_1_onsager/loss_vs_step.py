@@ -33,8 +33,8 @@ from terao_gamp_gaussian.F_1_onsager.core import train_single_replica
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot loss vs step for fixed alpha.")
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--N1", type=int, default=2520)
-    parser.add_argument("--N2", type=int, default=2520)
+    parser.add_argument("--N1", type=int, default=1000)
+    parser.add_argument("--N2", type=int, default=1000)
     parser.add_argument("--M", type=int, default=200)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument("--damping", type=float, default=0.5)
@@ -46,9 +46,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--beta-scale", type=float, default=1e-3)
     parser.add_argument("--beta-max", type=float, default=0.5)
-    parser.add_argument("--noise-var", type=float, default=1e-10)
+    parser.add_argument("--noise-var", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-replicas", type=int, default=5)
+    parser.add_argument("--num-replicas", type=int, default=3)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
 

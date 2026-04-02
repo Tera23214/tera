@@ -308,8 +308,9 @@ def train_single_replica(
     final_loss = 0.0
     steps_taken = max_steps
     prev_loss = float('inf')
-    history = {"steps": [], "loss": [], "qy": [], "damping": []}
+    history = {"steps": [], "loss": [], "loss_clean": [], "qy": [], "damping": []}
     history_loss_tensors = []
+    history_clean_loss_tensors = []
     history_qy_values = []
     
     for step in range(max_steps):
@@ -343,6 +344,9 @@ def train_single_replica(
             loss_tensor = compute_observed_loss(
                 m_W_eval, m_X_eval, Y_noisy, i_idx, j_idx, scale
             )
+            clean_loss_tensor = compute_observed_loss(
+                m_W_eval, m_X_eval, Y, i_idx, j_idx, scale
+            )
 
             if return_history:
                 qy_step = compute_qy(
@@ -353,6 +357,7 @@ def train_single_replica(
                 )
                 history["steps"].append(step + 1)
                 history_loss_tensors.append(loss_tensor.detach())
+                history_clean_loss_tensors.append(clean_loss_tensor.detach())
                 history_qy_values.append(qy_step)
                 history["damping"].append(damping_t)
 
@@ -380,6 +385,7 @@ def train_single_replica(
     if return_history:
         if history_loss_tensors:
             history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
+            history["loss_clean"] = torch.stack(history_clean_loss_tensors).cpu().tolist()
             history["qy"] = history_qy_values
             if not early_stop:
                 final_loss = float(history["loss"][-1])

@@ -35,19 +35,19 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 220   # Number of rows
-N2 = 220   # Number of columns  
+N1 = 1000   # Number of rows
+N2 = 1000   # Number of columns  
 M = 200      # Rank (hidden dimension)
 
-ALPHA_START =0.5
-ALPHA_STOP = 5.0
-ALPHA_STEP = 0.5
+ALPHA_START =0.1
+ALPHA_STOP = 3.0
+ALPHA_STEP = 0.2
 
 MAX_STEPS = 3000
 LR_BASE = 0.1     # Base learning rate (calibrated for N=1000)
 LR = LR_BASE * (1e6 / (N1 * N2 *M))  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
 SEED = 42
-NUM_REPLICAS = 30   # Number of replicas per alpha
+NUM_REPLICAS = 20   # Number of replicas per alpha
 CONVERGENCE_THRESHOLD = 1e-6  # Early stopping threshold for loss
 
 # ============================================================================
@@ -210,10 +210,10 @@ def train_single_replica(
     # Generate Y (observations)
     Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
     
-    # Initialize student randomly from the standard Gaussian prior
+    # Initialize student randomly
     torch.manual_seed(seed + 2000)
-    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32)
+    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
+    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
     
     # Alternating Gradient Descent loop with early stopping
     final_loss = 0.0
