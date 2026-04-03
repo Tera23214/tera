@@ -39,9 +39,9 @@ N1 = 1000   # Number of rows
 N2 = 1000   # Number of columns  
 M = 200      # Rank (hidden dimension)
 
-ALPHA_START =0.1
-ALPHA_STOP = 3.0
-ALPHA_STEP = 0.2
+ALPHA_START =0.01
+ALPHA_STOP = 0.08
+ALPHA_STEP = 0.02
 
 MAX_STEPS = 3000
 LR_BASE = 0.1     # Base learning rate (calibrated for N=1000)
