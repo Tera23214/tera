@@ -97,6 +97,21 @@ def sample_minibatch_positions(
     )
 
 
+def resolve_lr(
+    lr: float | None,
+    batch_size: int,
+    lr_base: float = LR_BASE,
+) -> float:
+    """
+    Resolve the learning rate using the same rule as loss_vs_step.py.
+    """
+    if lr is not None:
+        return float(lr)
+    if batch_size <= 0:
+        return 0.0
+    return float(lr_base / math.sqrt(batch_size))
+
+
 def sgd_step_W(
     W: torch.Tensor,
     X: torch.Tensor,
@@ -247,7 +262,8 @@ def train_single_replica(
     N2: int = N2,
     M: int = M,
     max_steps: int = MAX_STEPS,
-    lr: float = LR,
+    lr: float | None = None,
+    lr_base: float = LR_BASE,
     batch_size: int = BATCH_SIZE,
     noise_var: float = NOISE_VAR,
     convergence_threshold: float = CONVERGENCE_THRESHOLD,
@@ -271,6 +287,8 @@ def train_single_replica(
     num_observed = int(shared_data["num_observed"])
     if num_observed == 0:
         return 0.0, 0.0, 0
+
+    lr_value = resolve_lr(lr=lr, batch_size=batch_size, lr_base=lr_base)
 
     i_idx = shared_data["i_idx"]
     j_idx = shared_data["j_idx"]
@@ -300,7 +318,7 @@ def train_single_replica(
             Y_train,
             i_idx,
             j_idx,
-            lr,
+            lr_value,
             batch_positions,
         )
         X_hat = sgd_step_X(
@@ -309,7 +327,7 @@ def train_single_replica(
             Y_train,
             i_idx,
             j_idx,
-            lr,
+            lr_value,
             batch_positions,
         )
 
