@@ -9,6 +9,7 @@ This module implements G-AMP with:
 
 from .core import (
     train_single_replica,
+    prepare_shared_alpha_data,
     gamp_step_with_onsager,
     compute_y_cosine_similarity,
     f_input,
@@ -17,6 +18,7 @@ from .core import (
 
 __all__ = [
     'train_single_replica',
+    'prepare_shared_alpha_data',
     'gamp_step_with_onsager',
     'compute_y_cosine_similarity',
     'f_input',

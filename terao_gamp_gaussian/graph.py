@@ -112,6 +112,44 @@ class BiregularGraph:
         
         return i_idx, j_idx, E, C1, C2, alpha2
 
+    def generate_dense_mask(
+        self,
+        N1: int,
+        N2: int,
+        M: int,
+        alpha1: float,
+        device: torch.device,
+        seed: int = None,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        int,
+        int,
+        float,
+    ]:
+        """
+        Generate the same graph as ``generate`` and materialize it as a dense mask.
+
+        Returns:
+            mask: Dense binary observation mask with shape (N1, N2)
+            i_idx: Row indices of observed entries
+            j_idx: Column indices of observed entries
+            E: Total number of observed entries
+            C1: Degree of each W node
+            C2: Degree of each X node
+            alpha2: Computed alpha2 = (N1/N2) * alpha1
+        """
+        i_idx, j_idx, E, C1, C2, alpha2 = self.generate(
+            N1, N2, M, alpha1, device, seed
+        )
+        mask = torch.zeros((N1, N2), dtype=torch.float32, device=device)
+        if E > 0:
+            mask[i_idx.long(), j_idx.long()] = 1.0
+
+        return mask, i_idx, j_idx, E, C1, C2, alpha2
+
 
 # Backward compatibility wrapper
 class RandomGraph:

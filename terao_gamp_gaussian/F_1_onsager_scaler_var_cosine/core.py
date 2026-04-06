@@ -241,6 +241,75 @@ def compute_step_damping(
     return float(max(0.0, min(1.0, damping_t)))
 
 
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 10,
+    noise_var: float = 1e-10,
+    lam: float = 1.0,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph, teacher, and observations once for a single alpha.
+
+    The returned tensors are shared across replicas. Replica-to-replica
+    variation should come only from the student initialization.
+    """
+    graph = BiregularGraph()
+    i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(
+        N1, N2, M, alpha, device, seed
+    )
+
+    scale = lam / math.sqrt(M)
+    y_clean = torch.empty(E, device=device, dtype=torch.float32)
+    y_noisy = torch.empty(E, device=device, dtype=torch.float32)
+
+    if E == 0:
+        return {
+            "alpha": alpha,
+            "alpha2": alpha2,
+            "E": E,
+            "C1": C1,
+            "C2": C2,
+            "scale": scale,
+            "i_idx": i_idx,
+            "j_idx": j_idx,
+            "W_teacher": torch.empty((N1, M), dtype=torch.float32, device=device),
+            "X_teacher": torch.empty((M, N2), dtype=torch.float32, device=device),
+            "Y_clean": y_clean,
+            "Y_noisy": y_noisy,
+        }
+
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+
+    W_sel = W_teacher[i_idx.long(), :]
+    X_sel = X_teacher[:, j_idx.long()].T
+    y_clean = scale * (W_sel * X_sel).sum(dim=1)
+
+    torch.manual_seed(seed + 1000)
+    noise = torch.randn_like(y_clean) * math.sqrt(noise_var)
+    y_noisy = y_clean + noise
+
+    return {
+        "alpha": alpha,
+        "alpha2": alpha2,
+        "E": E,
+        "C1": C1,
+        "C2": C2,
+        "scale": scale,
+        "i_idx": i_idx,
+        "j_idx": j_idx,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "Y_clean": y_clean,
+        "Y_noisy": y_noisy,
+    }
+
+
 def train_single_replica(
     alpha: float,
     device: torch.device,
@@ -259,6 +328,7 @@ def train_single_replica(
     return_history: bool = False,
     loss_eval_interval: int = 50,
     early_stop: bool = True,
+    shared_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
     Train a single replica using G-AMP with F = 1 and Onsager correction.
@@ -270,31 +340,34 @@ def train_single_replica(
     
     This version includes proper Onsager correction using t-1 messages.
     """
-    # Generate observation graph (BiregularGraph for Dense Limit)
-    graph = BiregularGraph()
-    i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(N1, N2, M, alpha, device, seed)
-    
+    if shared_data is None:
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+        )
+
+    E = int(shared_data["E"])
     if E == 0:
         return 0.0, 0.0, 0
-    
-    # Generate teacher matrices W ~ N(0,1), X ~ N(0,1)
-    torch.manual_seed(seed)
-    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
-    
-    # Generate observations: Y = (λ/√M) Σ_μ W X
-    # Note: F=1, so no F factor
-    scale = lam / math.sqrt(M)
-    W_sel = W_teacher[i_idx.long(), :]
-    X_sel = X_teacher[:, j_idx.long()].T
-    Y = scale * (W_sel * X_sel).sum(dim=1)
-    
-    # Add noise
-    torch.manual_seed(seed + 1000)
-    noise = torch.randn_like(Y) * math.sqrt(noise_var)
-    Y_noisy = Y + noise
-    
-    # Initialize messages from the standard Gaussian prior, with v=1.0
+
+    i_idx = shared_data["i_idx"]
+    j_idx = shared_data["j_idx"]
+    W_teacher = shared_data["W_teacher"]
+    X_teacher = shared_data["X_teacher"]
+    Y = shared_data["Y_clean"]
+    Y_noisy = shared_data["Y_noisy"]
+    scale = float(shared_data["scale"])
+    N1, M = W_teacher.shape
+    N2 = X_teacher.shape[1]
+
+    # Initialize messages from the standard Gaussian prior, with v=1.0.
+    # Replica-to-replica variation comes only from this initialization.
     torch.manual_seed(seed + 2000)
     m_W = torch.randn(N1, M, device=device)
     v_W = torch.ones(N1, M, device=device)
@@ -418,4 +491,3 @@ def compute_y_cosine_similarity(
     denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
 
     return (inner / denom).item()
-
