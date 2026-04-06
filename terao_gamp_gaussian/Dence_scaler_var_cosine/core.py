@@ -33,15 +33,46 @@ def compute_y_cosine_similarity(
     Compute cosine similarity between Y_teacher = W_teacher X_teacher and
     Y_student = W_student X_student without materializing dense Y matrices.
     """
-    cross_w = W_teacher.T @ W_student
-    cross_x = X_student @ X_teacher.T
-    inner = torch.trace(cross_w @ cross_x)
+    teacher_w_t = W_teacher.T.contiguous()
+    teacher_x_t = X_teacher.T.contiguous()
+    teacher_w_gram = teacher_w_t @ W_teacher
+    teacher_x_gram = X_teacher @ teacher_x_t
+    teacher_norm_sq = torch.sum(teacher_w_gram * teacher_x_gram.T)
 
-    teacher_norm_sq = torch.trace((W_teacher.T @ W_teacher) @ (X_teacher @ X_teacher.T))
-    student_norm_sq = torch.trace((W_student.T @ W_student) @ (X_student @ X_student.T))
+    cosine_similarity = compute_y_cosine_similarity_tensor(
+        W_student=W_student,
+        X_student=X_student,
+        teacher_w_t=teacher_w_t,
+        teacher_x_t=teacher_x_t,
+        teacher_norm_sq=teacher_norm_sq,
+    )
+
+    return float(cosine_similarity.item())
+
+
+def compute_y_cosine_similarity_tensor(
+    W_student: torch.Tensor,
+    X_student: torch.Tensor,
+    teacher_w_t: torch.Tensor,
+    teacher_x_t: torch.Tensor,
+    teacher_norm_sq: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute Y-space cosine similarity and keep the result on-device.
+
+    The teacher-side factors are assumed to be precomputed and reused across
+    steps / replicas to avoid repeated O(NM^2) work and host-device sync.
+    """
+    cross_w = teacher_w_t @ W_student
+    cross_x = X_student @ teacher_x_t
+    inner = torch.sum(cross_w * cross_x.T)
+
+    student_w_gram = W_student.T @ W_student
+    student_x_gram = X_student @ X_student.T
+    student_norm_sq = torch.sum(student_w_gram * student_x_gram.T)
     denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
 
-    return (inner / denom).item()
+    return inner / denom
 
 
 def compute_step_damping(
@@ -121,6 +152,9 @@ def prepare_shared_alpha_data(
             "j_idx": j_idx,
             "W_teacher": torch.empty((N1, M), dtype=torch.float32, device=device),
             "X_teacher": torch.empty((M, N2), dtype=torch.float32, device=device),
+            "teacher_w_t": torch.empty((M, N1), dtype=torch.float32, device=device),
+            "teacher_x_t": torch.empty((N2, M), dtype=torch.float32, device=device),
+            "teacher_norm_sq": torch.tensor(0.0, dtype=torch.float32, device=device),
             "Y_clean_full": y_clean_full,
             "Y_noisy_full": y_noisy_full,
         }
@@ -128,6 +162,11 @@ def prepare_shared_alpha_data(
     torch.manual_seed(seed)
     W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
     X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+    teacher_w_t = W_teacher.T.contiguous()
+    teacher_x_t = X_teacher.T.contiguous()
+    teacher_w_gram = teacher_w_t @ W_teacher
+    teacher_x_gram = X_teacher @ teacher_x_t
+    teacher_norm_sq = torch.sum(teacher_w_gram * teacher_x_gram.T)
     y_clean_full = mask * (scale * (W_teacher @ X_teacher))
 
     torch.manual_seed(seed + 1000)
@@ -149,6 +188,9 @@ def prepare_shared_alpha_data(
         "j_idx": j_idx,
         "W_teacher": W_teacher,
         "X_teacher": X_teacher,
+        "teacher_w_t": teacher_w_t,
+        "teacher_x_t": teacher_x_t,
+        "teacher_norm_sq": teacher_norm_sq,
         "Y_clean_full": y_clean_full,
         "Y_noisy_full": y_noisy_full,
     }
@@ -248,6 +290,7 @@ def train_single_replica(
     return_history: bool = False,
     loss_eval_interval: int = 50,
     early_stop: bool = True,
+    record_clean_loss: bool = True,
     shared_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
@@ -286,6 +329,15 @@ def train_single_replica(
     Y_clean_full = shared_data["Y_clean_full"]
     W_teacher = shared_data["W_teacher"]
     X_teacher = shared_data["X_teacher"]
+    teacher_w_t = shared_data.get("teacher_w_t")
+    teacher_x_t = shared_data.get("teacher_x_t")
+    teacher_norm_sq = shared_data.get("teacher_norm_sq")
+    if teacher_w_t is None or teacher_x_t is None or teacher_norm_sq is None:
+        teacher_w_t = W_teacher.T.contiguous()
+        teacher_x_t = X_teacher.T.contiguous()
+        teacher_w_gram = teacher_w_t @ W_teacher
+        teacher_x_gram = X_teacher @ teacher_x_t
+        teacher_norm_sq = torch.sum(teacher_w_gram * teacher_x_gram.T)
     N1, N2 = mask.shape
     M = W_teacher.shape[1]
 
@@ -305,13 +357,14 @@ def train_single_replica(
     history = {
         "steps": [],
         "loss": [],
-        "loss_clean": [],
         "cosine_similarity": [],
         "damping": [],
     }
+    if record_clean_loss:
+        history["loss_clean"] = []
     history_loss_tensors = []
-    history_clean_loss_tensors = []
-    history_cosine_values = []
+    history_clean_loss_tensors = [] if record_clean_loss else None
+    history_cosine_tensors = []
 
     for step in range(max_steps):
         m_W_old = m_W
@@ -350,21 +403,25 @@ def train_single_replica(
             loss_tensor = compute_observed_loss_dense(
                 m_W_eval, m_X_eval, Y_noisy_full, mask, scale
             )
-            clean_loss_tensor = compute_observed_loss_dense(
-                m_W_eval, m_X_eval, Y_clean_full, mask, scale
-            )
+            clean_loss_tensor = None
+            if record_clean_loss:
+                clean_loss_tensor = compute_observed_loss_dense(
+                    m_W_eval, m_X_eval, Y_clean_full, mask, scale
+                )
 
             if return_history:
-                cosine_similarity_step = compute_y_cosine_similarity(
+                cosine_similarity_step = compute_y_cosine_similarity_tensor(
                     m_W_eval,
                     m_X_eval,
-                    W_teacher,
-                    X_teacher,
+                    teacher_w_t,
+                    teacher_x_t,
+                    teacher_norm_sq,
                 )
                 history["steps"].append(step + 1)
                 history_loss_tensors.append(loss_tensor.detach())
-                history_clean_loss_tensors.append(clean_loss_tensor.detach())
-                history_cosine_values.append(cosine_similarity_step)
+                if record_clean_loss and clean_loss_tensor is not None:
+                    history_clean_loss_tensors.append(clean_loss_tensor.detach())
+                history_cosine_tensors.append(cosine_similarity_step.detach())
                 history["damping"].append(damping_t)
 
             loss = None
@@ -383,13 +440,24 @@ def train_single_replica(
 
     m_W = normalize_to_unit_variance(m_W)
     m_X = normalize_to_unit_variance(m_X)
-    cosine_similarity = compute_y_cosine_similarity(m_W, m_X, W_teacher, X_teacher)
+    cosine_similarity = float(
+        compute_y_cosine_similarity_tensor(
+            m_W,
+            m_X,
+            teacher_w_t,
+            teacher_x_t,
+            teacher_norm_sq,
+        ).item()
+    )
 
     if return_history:
         if history_loss_tensors:
             history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
-            history["loss_clean"] = torch.stack(history_clean_loss_tensors).cpu().tolist()
-            history["cosine_similarity"] = history_cosine_values
+            if record_clean_loss and history_clean_loss_tensors:
+                history["loss_clean"] = (
+                    torch.stack(history_clean_loss_tensors).cpu().tolist()
+                )
+            history["cosine_similarity"] = torch.stack(history_cosine_tensors).cpu().tolist()
             if not early_stop:
                 final_loss = float(history["loss"][-1])
         return cosine_similarity, final_loss, steps_taken, history

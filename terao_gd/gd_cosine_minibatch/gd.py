@@ -1,0 +1,551 @@
+#!/usr/bin/env python
+"""
+Alternating mini-batch SGD for sparse matrix factorization with
+cosine-similarity evaluation.
+
+This variant is based on ``terao_gd/gd_cosine`` but replaces full-batch
+alternating gradient descent with observed-edge mini-batches sampled
+with replacement. Graph / teacher / noisy observations are generated once per
+alpha and reused across replicas. Replica-to-replica variation comes only from
+student initialization.
+"""
+
+import math
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import yaml
+
+# Add project root to path(to get shared modules)
+repo_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(repo_root))
+
+from terao_gamp_gaussian.graph import RandomGraph
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+N1 = 1000
+N2 = 1000
+M = 200
+
+ALPHA_START = 0.1
+ALPHA_STOP = 3.0
+ALPHA_STEP = 0.2
+
+MAX_STEPS = 3000
+LR_BASE = 0.1
+BATCH_SIZE = 8192
+LR = LR_BASE / math.sqrt(BATCH_SIZE)
+NOISE_VAR = 0.0
+SEED = 42
+NUM_REPLICAS = 20
+CONVERGENCE_THRESHOLD = 1e-6
+LOSS_EVAL_INTERVAL = 100
+
+
+# ============================================================================
+# SGD Helper Functions
+# ============================================================================
+
+
+def compute_predictions(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    M: int,
+) -> torch.Tensor:
+    """
+    Compute predictions Y_pred for observed entries.
+
+    Y_pred[c] = (1/sqrt(M)) * sum_mu W[i_c, mu] * X[mu, j_c]
+    """
+    W_sel = W[i_idx.long(), :]
+    X_sel = X[:, j_idx.long()].T
+    return (W_sel * X_sel).sum(dim=1) / math.sqrt(M)
+
+
+def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
+    """
+    Compute the observed-entry loss used by the existing AGD implementation.
+    """
+    return M * ((Y - Y_pred) ** 2).sum()
+
+
+def sample_minibatch_positions(
+    num_observed: int,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Sample observed-entry positions with replacement.
+    """
+    if num_observed <= 0 or batch_size <= 0:
+        return torch.empty(0, dtype=torch.long, device=device)
+    return torch.randint(
+        low=0,
+        high=num_observed,
+        size=(batch_size,),
+        device=device,
+    )
+
+
+def sgd_step_W(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    lr: float,
+    batch_positions: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Mini-batch gradient step for W.
+    """
+    _, M = W.shape
+    batch_i = i_idx[batch_positions].long()
+    batch_j = j_idx[batch_positions].long()
+    batch_y = Y[batch_positions]
+
+    Y_pred = compute_predictions(W, X, batch_i, batch_j, M)
+    residual = Y_pred - batch_y
+    X_sel = X[:, batch_j].T
+
+    grad_contrib = (
+        2.0
+        * math.sqrt(M)
+        * residual.unsqueeze(1)
+        * X_sel
+    )
+
+    grad_W = torch.zeros_like(W)
+    grad_W.scatter_add_(0, batch_i.unsqueeze(1).expand(-1, M), grad_contrib)
+    return W - lr * grad_W
+
+
+def sgd_step_X(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    Y: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    lr: float,
+    batch_positions: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Mini-batch gradient step for X.
+    """
+    M, _ = X.shape
+    batch_i = i_idx[batch_positions].long()
+    batch_j = j_idx[batch_positions].long()
+    batch_y = Y[batch_positions]
+
+    Y_pred = compute_predictions(W, X, batch_i, batch_j, M)
+    residual = Y_pred - batch_y
+    W_sel = W[batch_i, :]
+
+    grad_contrib = (
+        2.0
+        * math.sqrt(M)
+        * residual.unsqueeze(1)
+        * W_sel
+    )
+
+    grad_X = torch.zeros_like(X)
+    grad_X.scatter_add_(1, batch_j.unsqueeze(0).expand(M, -1), grad_contrib.T)
+    return X - lr * grad_X
+
+
+def normalize_to_unit_variance(tensor: torch.Tensor) -> torch.Tensor:
+    mean_sq = (tensor ** 2).mean()
+    if mean_sq > 0:
+        return tensor / torch.sqrt(mean_sq)
+    return tensor
+
+
+def compute_y_cosine_similarity(
+    W_student: torch.Tensor,
+    X_student: torch.Tensor,
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+) -> float:
+    """
+    Compute cosine similarity between Y_teacher = W_teacher X_teacher and
+    Y_student = W_student X_student without materializing dense Y matrices.
+    """
+    cross_w = W_teacher.T @ W_student
+    cross_x = X_student @ X_teacher.T
+    inner = torch.trace(cross_w @ cross_x)
+
+    teacher_norm_sq = torch.trace((W_teacher.T @ W_teacher) @ (X_teacher @ X_teacher.T))
+    student_norm_sq = torch.trace((W_student.T @ W_student) @ (X_student @ X_student.T))
+    denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
+
+    return (inner / denom).item()
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 200,
+    noise_var: float = 0.0,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph, teacher, and observed values once for a single alpha.
+    """
+    graph = RandomGraph()
+    i_idx, j_idx, num_observed = graph.generate(N1, N2, M, alpha, device, seed)
+
+    if num_observed == 0:
+        return {
+            "alpha": alpha,
+            "num_observed": 0,
+            "i_idx": i_idx,
+            "j_idx": j_idx,
+            "W_teacher": torch.empty((N1, M), dtype=torch.float32, device=device),
+            "X_teacher": torch.empty((M, N2), dtype=torch.float32, device=device),
+            "Y_clean": torch.empty(0, dtype=torch.float32, device=device),
+            "Y_train": torch.empty(0, dtype=torch.float32, device=device),
+        }
+
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+    Y_clean = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
+
+    torch.manual_seed(seed + 1000)
+    noise = torch.randn_like(Y_clean) * math.sqrt(noise_var)
+    Y_train = Y_clean + noise
+
+    return {
+        "alpha": alpha,
+        "num_observed": num_observed,
+        "i_idx": i_idx,
+        "j_idx": j_idx,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "Y_clean": Y_clean,
+        "Y_train": Y_train,
+    }
+
+
+def train_single_replica(
+    alpha: float,
+    device: torch.device,
+    seed: int,
+    N1: int = N1,
+    N2: int = N2,
+    M: int = M,
+    max_steps: int = MAX_STEPS,
+    lr: float = LR,
+    batch_size: int = BATCH_SIZE,
+    noise_var: float = NOISE_VAR,
+    convergence_threshold: float = CONVERGENCE_THRESHOLD,
+    loss_eval_interval: int = LOSS_EVAL_INTERVAL,
+    shared_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> tuple[float, float, int]:
+    """
+    Train a single replica for a given alpha using alternating mini-batch SGD.
+    """
+    if shared_data is None:
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+        )
+
+    num_observed = int(shared_data["num_observed"])
+    if num_observed == 0:
+        return 0.0, 0.0, 0
+
+    i_idx = shared_data["i_idx"]
+    j_idx = shared_data["j_idx"]
+    Y_train = shared_data["Y_train"]
+    W_teacher = shared_data["W_teacher"]
+    X_teacher = shared_data["X_teacher"]
+    N1, M = W_teacher.shape
+    N2 = X_teacher.shape[1]
+
+    torch.manual_seed(seed + 2000)
+    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
+    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
+
+    final_loss = 0.0
+    steps_taken = max_steps
+
+    for step in range(max_steps):
+        batch_positions = sample_minibatch_positions(
+            num_observed=num_observed,
+            batch_size=batch_size,
+            device=device,
+        )
+
+        W_hat = sgd_step_W(
+            W_hat,
+            X_hat,
+            Y_train,
+            i_idx,
+            j_idx,
+            lr,
+            batch_positions,
+        )
+        X_hat = sgd_step_X(
+            W_hat,
+            X_hat,
+            Y_train,
+            i_idx,
+            j_idx,
+            lr,
+            batch_positions,
+        )
+
+        W_hat = normalize_to_unit_variance(W_hat)
+        X_hat = normalize_to_unit_variance(X_hat)
+
+        if step % loss_eval_interval == 0 or step == max_steps - 1:
+            Y_pred_full = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
+            loss = float(compute_loss(Y_train, Y_pred_full, M).item())
+            final_loss = loss
+
+            if loss < convergence_threshold:
+                steps_taken = step + 1
+                break
+
+    cosine_similarity = compute_y_cosine_similarity(
+        W_hat, X_hat, W_teacher, X_teacher
+    )
+    return cosine_similarity, final_loss, steps_taken
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Alternating Mini-Batch SGD - Matrix Factorization")
+    print("Cosine Similarity Evaluation")
+    print("=" * 60)
+
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using: Apple Silicon (MPS)")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using: CUDA ({torch.cuda.get_device_name()})")
+    else:
+        device = torch.device("cpu")
+        print("Using: CPU")
+
+    print(f"Matrix: {N1}×{N2}, M={M}")
+    print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
+    print(f"Steps: {MAX_STEPS}, LR={LR}, Batch={BATCH_SIZE}")
+    print("Sampling: with replacement from observed edges")
+    print("Shared per alpha: graph / teacher / observations")
+    print("Replica-specific: student initialization only")
+    print(f"Replicas per alpha: {NUM_REPLICAS}")
+    print()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir_name = (
+        f"{timestamp}_sgd_cosine_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
+    )
+    results_dir = Path(__file__).parent / "results" / results_dir_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results directory: {results_dir}")
+
+    config = {
+        "algorithm": "sgd_cosine_minibatch",
+        "N1": N1,
+        "N2": N2,
+        "M": M,
+        "alpha_start": ALPHA_START,
+        "alpha_stop": ALPHA_STOP,
+        "alpha_step": ALPHA_STEP,
+        "max_steps": MAX_STEPS,
+        "lr": LR,
+        "lr_base": LR_BASE,
+        "batch_size": BATCH_SIZE,
+        "lr_auto_formula": "lr_base / sqrt(batch_size)",
+        "noise_var": NOISE_VAR,
+        "seed": SEED,
+        "num_replicas": NUM_REPLICAS,
+        "convergence_threshold": CONVERGENCE_THRESHOLD,
+        "device": str(device),
+        "evaluation_metric": "cosine_similarity_in_Y_space",
+        "sampling": "with_replacement",
+        "shared_per_alpha_graph_noise": True,
+        "replica_variation": "student_initialization_only",
+    }
+    config_path = results_dir / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Config saved: {config_path}")
+
+    alphas = np.arange(ALPHA_START, ALPHA_STOP + ALPHA_STEP / 2, ALPHA_STEP)
+    results = {}
+
+    start_time = time.time()
+    total_tasks = len(alphas) * NUM_REPLICAS
+    completed = 0
+
+    for alpha_id, alpha in enumerate(alphas):
+        shared_seed = SEED + alpha_id * 10000
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=shared_seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=NOISE_VAR,
+        )
+
+        cosine_similarity_values = []
+        loss_values = []
+        steps_values = []
+
+        for replica_id in range(NUM_REPLICAS):
+            replica_seed = SEED + replica_id * 1000
+            t0 = time.time()
+            cosine_similarity, final_loss, steps_taken = train_single_replica(
+                alpha=alpha,
+                device=device,
+                seed=replica_seed,
+                N1=N1,
+                N2=N2,
+                M=M,
+                max_steps=MAX_STEPS,
+                lr=LR,
+                batch_size=BATCH_SIZE,
+                noise_var=NOISE_VAR,
+                convergence_threshold=CONVERGENCE_THRESHOLD,
+                shared_data=shared_data,
+            )
+            dt = time.time() - t0
+            cosine_similarity_values.append(cosine_similarity)
+            loss_values.append(final_loss)
+            steps_values.append(steps_taken)
+            completed += 1
+            print(
+                f"α={alpha:.2f}, replica {replica_id + 1}/{NUM_REPLICAS}: "
+                f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
+                f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
+            )
+
+        results[alpha] = {
+            "cosine_similarity_mean": np.mean(cosine_similarity_values),
+            "cosine_similarity_std": np.std(cosine_similarity_values),
+            "cosine_similarity_values": cosine_similarity_values,
+            "loss_mean": np.mean(loss_values),
+            "loss_std": np.std(loss_values),
+            "loss_values": loss_values,
+            "steps_mean": np.mean(steps_values),
+        }
+
+    total_time = time.time() - start_time
+
+    print("\n" + "=" * 60)
+    print("Results (mean ± std)")
+    print("=" * 60)
+    print(f"{'Alpha':>6} | {'CosSim':^20} | {'Loss':^20} | {'Steps':>8}")
+    print("-" * 60)
+    for alpha in sorted(results.keys()):
+        r = results[alpha]
+        print(
+            f"{alpha:6.2f} | "
+            f"{r['cosine_similarity_mean']:8.4f} ± {r['cosine_similarity_std']:<8.4f} | "
+            f"{r['loss_mean']:8.2e} ± {r['loss_std']:<8.2e} | "
+            f"{r['steps_mean']:8.0f}"
+        )
+
+    print(f"\nTotal time: {total_time:.1f}s")
+    print("=" * 60)
+
+    print("\nGenerating plots...")
+    alphas_list = sorted(results.keys())
+    cosine_similarity_means = [
+        results[a]["cosine_similarity_mean"] for a in alphas_list
+    ]
+    cosine_similarity_stds = [
+        results[a]["cosine_similarity_std"] for a in alphas_list
+    ]
+    cosine_similarity_sems = [
+        std / math.sqrt(NUM_REPLICAS) for std in cosine_similarity_stds
+    ]
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.errorbar(
+        alphas_list,
+        cosine_similarity_means,
+        yerr=cosine_similarity_sems,
+        fmt="o-",
+        color="#1E88E5",
+        markersize=6,
+        linewidth=2,
+        capsize=4,
+        capthick=1.5,
+        elinewidth=1.5,
+    )
+    ax.set_xlabel(r"$\alpha$ (observation density)", fontsize=14)
+    ax.set_ylabel("Cosine Similarity", fontsize=14)
+    ax.set_title(
+        f"Phase Transition (Alternating Mini-Batch SGD)\n"
+        f"({N1}×{N2}, M={M}, {MAX_STEPS} steps, {NUM_REPLICAS} replicas)",
+        fontsize=16,
+    )
+    ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)
+    ax.set_ylim(-0.05, 1.05)
+    ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+    ax.axhline(y=1, color="gray", linestyle="--", alpha=0.5)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plots_dir = results_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
+    plot_path = plots_dir / "cosine_similarity_vs_alpha.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    print(f"Plot saved: {plot_path}")
+    plt.show()
+
+    csv_path = results_dir / "metrics.csv"
+    with open(csv_path, "w") as f:
+        header = (
+            "alpha,cosine_similarity_mean,cosine_similarity_std,"
+            "Loss_mean,Loss_std,Steps_mean"
+        )
+        for i in range(NUM_REPLICAS):
+            header += f",cosine_similarity_replica_{i},loss_replica_{i}"
+        f.write(header + "\n")
+
+        for alpha in alphas_list:
+            r = results[alpha]
+            line = (
+                f"{alpha},{r['cosine_similarity_mean']},"
+                f"{r['cosine_similarity_std']},{r['loss_mean']},"
+                f"{r['loss_std']},{r['steps_mean']}"
+            )
+            for cosine_similarity_value, loss_v in zip(
+                r["cosine_similarity_values"], r["loss_values"]
+            ):
+                line += f",{cosine_similarity_value},{loss_v}"
+            f.write(line + "\n")
+
+    print(f"Metrics saved: {csv_path}")
+    print(f"\nResults saved to: {results_dir}")
+    print("Done!")

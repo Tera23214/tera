@@ -1,0 +1,22 @@
+M: 20
+N1: 100
+N2: 100
+algorithm: sgd_cosine_minibatch_loss_vs_step
+alpha: 1.0
+batch_size: 5000
+convergence_threshold: 1.0e-06
+device: mps
+evaluation_metric: cosine_similarity_in_Y_space
+lr: 0.001414213562373095
+lr_auto_formula: lr_base / sqrt(batch_size)
+lr_base: 0.1
+max_steps: 1000
+noise_var: 0.001
+num_observed: 2000
+num_replicas: 3
+record_interval: 5
+replica_variation: student_initialization_only
+sampling: with_replacement
+seed: 42
+shared_per_alpha_graph_noise: true
+student_init: standard_normal
