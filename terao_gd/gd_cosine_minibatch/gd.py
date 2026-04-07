@@ -31,23 +31,23 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 1000
-N2 = 1000
+N1 = 2000
+N2 = 2000
 M = 200
 
 ALPHA_START = 0.1
-ALPHA_STOP = 3.0
+ALPHA_STOP = 8.0
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 3000
+MAX_STEPS = 15000
 LR_BASE = 0.1
-BATCH_SIZE = 8192
+BATCH_SIZE = 3000
 LR = LR_BASE / math.sqrt(BATCH_SIZE)
-NOISE_VAR = 0.0
+NOISE_VAR = 0
 SEED = 42
-NUM_REPLICAS = 20
+NUM_REPLICAS = 10
 CONVERGENCE_THRESHOLD = 1e-6
-LOSS_EVAL_INTERVAL = 100
+LOSS_EVAL_INTERVAL = 500
 
 
 # ============================================================================
