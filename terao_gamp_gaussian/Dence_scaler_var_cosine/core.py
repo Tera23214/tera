@@ -5,8 +5,8 @@ cosine-similarity evaluation.
 
 This variant materializes the observation mask and output-channel variables on
 the full (N1, N2) grid so that the main updates reduce to dense matrix
-multiplications. Shared graph / teacher / noisy observations can be prepared
-once per alpha and reused across replicas.
+multiplications. Teacher / noise can be prepared once per simulation and
+reused across alphas, while the observation graph is prepared once per alpha.
 """
 
 import math
@@ -109,10 +109,9 @@ def compute_observed_loss_dense(
     return (mask * (Y_obs_full - Y_pred) ** 2).sum() / num_observed
 
 
-def prepare_shared_alpha_data(
-    alpha: float,
+def prepare_global_shared_data(
     device: torch.device,
-    seed: int,
+    seed: int = 1,
     N1: int = 1000,
     N2: int = 1000,
     M: int = 10,
@@ -120,11 +119,64 @@ def prepare_shared_alpha_data(
     lam: float = 1.0,
 ) -> dict[str, torch.Tensor | float | int]:
     """
-    Prepare graph, teacher, and observations once for a single alpha.
+    Prepare teacher and full-grid noise once for the whole simulation.
+    """
+    scale = lam / math.sqrt(M)
 
-    The returned tensors are shared across replicas. Replica-to-replica
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+    teacher_w_t = W_teacher.T.contiguous()
+    teacher_x_t = X_teacher.T.contiguous()
+    teacher_w_gram = teacher_w_t @ W_teacher
+    teacher_x_gram = X_teacher @ teacher_x_t
+    teacher_norm_sq = torch.sum(teacher_w_gram * teacher_x_gram.T)
+
+    torch.manual_seed(seed)
+    noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "scale": scale,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "teacher_w_t": teacher_w_t,
+        "teacher_x_t": teacher_x_t,
+        "teacher_norm_sq": teacher_norm_sq,
+        "noise_full": noise_full,
+    }
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int = 1,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 10,
+    noise_var: float = 1e-10,
+    lam: float = 1.0,
+    global_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph and observations once for a single alpha.
+
+    Teacher and noise are shared across the whole simulation. The returned
+    alpha-specific tensors are shared across replicas, so replica-to-replica
     variation should come only from the student initialization.
     """
+    if global_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+        )
+
     graph = BiregularGraph()
     mask, i_idx, j_idx, E, C1, C2, alpha2 = graph.generate_dense_mask(
         N1=N1,
@@ -135,9 +187,15 @@ def prepare_shared_alpha_data(
         seed=seed,
     )
 
-    scale = lam / math.sqrt(M)
+    scale = float(global_data["scale"])
     y_noisy_full = torch.zeros((N1, N2), dtype=torch.float32, device=device)
     y_clean_full = torch.zeros((N1, N2), dtype=torch.float32, device=device)
+    W_teacher = global_data["W_teacher"]
+    X_teacher = global_data["X_teacher"]
+    teacher_w_t = global_data["teacher_w_t"]
+    teacher_x_t = global_data["teacher_x_t"]
+    teacher_norm_sq = global_data["teacher_norm_sq"]
+    noise_full = global_data["noise_full"]
 
     if E == 0:
         return {
@@ -150,31 +208,17 @@ def prepare_shared_alpha_data(
             "mask": mask,
             "i_idx": i_idx,
             "j_idx": j_idx,
-            "W_teacher": torch.empty((N1, M), dtype=torch.float32, device=device),
-            "X_teacher": torch.empty((M, N2), dtype=torch.float32, device=device),
-            "teacher_w_t": torch.empty((M, N1), dtype=torch.float32, device=device),
-            "teacher_x_t": torch.empty((N2, M), dtype=torch.float32, device=device),
-            "teacher_norm_sq": torch.tensor(0.0, dtype=torch.float32, device=device),
+            "W_teacher": W_teacher,
+            "X_teacher": X_teacher,
+            "teacher_w_t": teacher_w_t,
+            "teacher_x_t": teacher_x_t,
+            "teacher_norm_sq": teacher_norm_sq,
             "Y_clean_full": y_clean_full,
             "Y_noisy_full": y_noisy_full,
         }
 
-    torch.manual_seed(seed)
-    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
-    teacher_w_t = W_teacher.T.contiguous()
-    teacher_x_t = X_teacher.T.contiguous()
-    teacher_w_gram = teacher_w_t @ W_teacher
-    teacher_x_gram = X_teacher @ teacher_x_t
-    teacher_norm_sq = torch.sum(teacher_w_gram * teacher_x_gram.T)
     y_clean_full = mask * (scale * (W_teacher @ X_teacher))
-
-    torch.manual_seed(seed + 1000)
-    noise_obs = torch.randn(E, device=device, dtype=torch.float32) * math.sqrt(noise_var)
-    y_noisy_full.copy_(y_clean_full)
-    y_noisy_full[i_idx.long(), j_idx.long()] = (
-        y_clean_full[i_idx.long(), j_idx.long()] + noise_obs
-    )
+    y_noisy_full = mask * (scale * (W_teacher @ X_teacher) + noise_full)
 
     return {
         "alpha": alpha,
@@ -297,8 +341,9 @@ def train_single_replica(
     Train a single replica using the dense-mask backend.
 
     If ``shared_data`` is provided, graph / teacher / noisy observations are
-    reused. Otherwise they are generated for this call from ``alpha`` and
-    ``seed``.
+    reused. Otherwise teacher/noise are generated once and graph is generated
+    for the requested alpha. The ``seed`` argument controls only the student
+    initialization.
     """
     if shared_data is None:
         if alpha is None:
@@ -308,7 +353,7 @@ def train_single_replica(
         shared_data = prepare_shared_alpha_data(
             alpha=alpha,
             device=device,
-            seed=seed,
+            seed=1,
             N1=N1,
             N2=N2,
             M=M,

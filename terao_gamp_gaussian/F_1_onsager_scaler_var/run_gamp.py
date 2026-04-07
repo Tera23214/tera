@@ -19,7 +19,11 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.F_1_onsager_scaler_var.core import train_single_replica
+from terao_gamp_gaussian.F_1_onsager_scaler_var.core import (
+    prepare_global_shared_data,
+    prepare_shared_alpha_data,
+    train_single_replica,
+)
 
 # ============================================================================
 # Configuration
@@ -39,7 +43,8 @@ USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
 DAMPING_BETA_MAX = DAMPING
 NOISE_VAR = 1e-10
-SEED = 42
+SHARED_SEED = 1
+STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 30
 CONVERGENCE_THRESHOLD = 1e-6
 
@@ -74,6 +79,8 @@ if __name__ == "__main__":
     else:
         print(f"Steps: {MAX_STEPS}, Damping: {DAMPING}")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_id")
     print()
     
     # Create results directory
@@ -98,12 +105,17 @@ if __name__ == "__main__":
         'damping_beta_scale': DAMPING_BETA_SCALE,
         'damping_beta_max': DAMPING_BETA_MAX,
         'noise_var': NOISE_VAR,
-        'seed': SEED,
+        'teacher_seed': SHARED_SEED,
+        'graph_seed': SHARED_SEED,
+        'noise_seed': SHARED_SEED,
+        'student_seed_base': STUDENT_SEED_BASE,
         'num_replicas': NUM_REPLICAS,
         'convergence_threshold': CONVERGENCE_THRESHOLD,
         'device': str(device),
         'onsager_correction': True,
         'F_type': 'constant_1',  # F=1
+        'shared_teacher_noise_global': True,
+        'shared_graph_per_alpha': True,
     }
     config_path = results_dir / "config.yaml"
     with open(config_path, 'w') as f:
@@ -117,14 +129,32 @@ if __name__ == "__main__":
     start_time = time.time()
     total_tasks = len(alphas) * NUM_REPLICAS
     completed = 0
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=SHARED_SEED,
+        N1=N1,
+        N2=N2,
+        M=M,
+        noise_var=NOISE_VAR,
+    )
     
     for alpha in alphas:
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=SHARED_SEED,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=NOISE_VAR,
+            global_data=global_data,
+        )
         qy_values = []
         loss_values = []
         steps_values = []
         
         for replica_id in range(NUM_REPLICAS):
-            seed = SEED + replica_id * 1000
+            seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
             
             qy, final_loss, steps_taken = train_single_replica(
@@ -141,6 +171,7 @@ if __name__ == "__main__":
                 damping_beta_max=DAMPING_BETA_MAX,
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
+                shared_data=shared_data,
             )
             
             dt = time.time() - t0

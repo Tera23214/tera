@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 """
-G-AMP Simulation Runner with F=1, Onsager Correction, and
+Dense-mask G-AMP simulation runner with F=1, exact Onsager correction, and
 cosine-similarity evaluation.
-
-Runs G-AMP algorithm with F = 1 (constant) and proper Onsager term for various alpha values.
 """
 
 import sys
@@ -20,7 +18,11 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.F_1_onsager_cosine.core import train_single_replica
+from terao_gamp_gaussian.F_1_onsager_cosine.core import (
+    prepare_global_shared_data,
+    prepare_shared_alpha_data,
+    train_single_replica,
+)
 
 # ============================================================================
 # Configuration
@@ -40,7 +42,8 @@ USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
 DAMPING_BETA_MAX = DAMPING
 NOISE_VAR = 1e-10
-SEED = 42
+SHARED_SEED = 1
+STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 30
 CONVERGENCE_THRESHOLD = 1e-6
 
@@ -50,8 +53,7 @@ CONVERGENCE_THRESHOLD = 1e-6
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("G-AMP with F=1 + Onsager Correction (Cosine Similarity)")
-    print("Sparse Matrix Factorization")
+    print("Dense-mask G-AMP with F=1 + Onsager Correction (Cosine Similarity)")
     print("=" * 60)
     
     # Device setup
@@ -75,12 +77,17 @@ if __name__ == "__main__":
     else:
         print(f"Steps: {MAX_STEPS}, Damping: {DAMPING}")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_id")
+    print("Shared across run: teacher / noisy field")
+    print("Shared per alpha: graph")
+    print("Replica-specific: student initialization only")
     print()
     
     # Create results directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir_name = (
-        f"{timestamp}_gamp_F_1_onsager_cosine_{N1}x{M}"
+        f"{timestamp}_gamp_F_1_onsager_cosine_dense_{N1}x{M}"
         f"_alpha{ALPHA_START}-{ALPHA_STOP}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
@@ -89,7 +96,7 @@ if __name__ == "__main__":
     
     # Save configuration
     config = {
-        'algorithm': 'gamp_F_1_onsager_cosine',
+        'algorithm': 'gamp_F_1_onsager_cosine_dense',
         'N1': N1,
         'N2': N2,
         'M': M,
@@ -102,13 +109,19 @@ if __name__ == "__main__":
         'damping_beta_scale': DAMPING_BETA_SCALE,
         'damping_beta_max': DAMPING_BETA_MAX,
         'noise_var': NOISE_VAR,
-        'seed': SEED,
+        'teacher_seed': SHARED_SEED,
+        'graph_seed': SHARED_SEED,
+        'noise_seed': SHARED_SEED,
+        'student_seed_base': STUDENT_SEED_BASE,
         'num_replicas': NUM_REPLICAS,
         'convergence_threshold': CONVERGENCE_THRESHOLD,
         'device': str(device),
         'onsager_correction': True,
         'F_type': 'constant_1',  # F=1
         'evaluation_metric': 'cosine_similarity_in_Y_space',
+        'shared_teacher_noise_global': True,
+        'shared_graph_per_alpha': True,
+        'dense_mask': True,
     }
     config_path = results_dir / "config.yaml"
     with open(config_path, 'w') as f:
@@ -122,14 +135,32 @@ if __name__ == "__main__":
     start_time = time.time()
     total_tasks = len(alphas) * NUM_REPLICAS
     completed = 0
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=SHARED_SEED,
+        N1=N1,
+        N2=N2,
+        M=M,
+        noise_var=NOISE_VAR,
+    )
     
     for alpha in alphas:
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=SHARED_SEED,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=NOISE_VAR,
+            global_data=global_data,
+        )
         cosine_similarity_values = []
         loss_values = []
         steps_values = []
         
         for replica_id in range(NUM_REPLICAS):
-            seed = SEED + replica_id * 1000
+            seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
             
             cosine_similarity, final_loss, steps_taken = train_single_replica(
@@ -146,6 +177,7 @@ if __name__ == "__main__":
                 damping_beta_max=DAMPING_BETA_MAX,
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
+                shared_data=shared_data,
             )
             
             dt = time.time() - t0
@@ -202,10 +234,10 @@ if __name__ == "__main__":
     ax.errorbar(alphas_list, cosine_similarity_means, yerr=cosine_similarity_sems,
                 fmt='o-', color='#1976D2', markersize=6, linewidth=2,
                 capsize=4, capthick=1.5, elinewidth=1.5,
-                label='G-AMP (F=1 + Onsager)')
+                label='Dense-mask G-AMP (F=1 + Onsager)')
     ax.set_xlabel(r'$\alpha$ (observation density)', fontsize=14)
     ax.set_ylabel("Cosine Similarity", fontsize=14)
-    ax.set_title(f'Phase Transition (G-AMP with F=1 + Onsager)\n({N1}×{N2}, M={M}, {MAX_STEPS} steps)', fontsize=16)
+    ax.set_title(f'Phase Transition (Dense-mask G-AMP with F=1 + Onsager)\n({N1}×{N2}, M={M}, {MAX_STEPS} steps)', fontsize=16)
     ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)
     ax.set_ylim(-0.05, 1.05)
     ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)

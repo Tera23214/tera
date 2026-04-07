@@ -75,6 +75,7 @@ def _run_replica(kwargs: dict) -> dict:
         damping_beta_max=kwargs["damping_beta_max"],
         noise_var=kwargs["noise_var"],
         convergence_threshold=kwargs["convergence_threshold"],
+        shared_data=kwargs["shared_data"],
     )
 
     runtime = time.time() - t0
@@ -99,13 +100,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Parallel G-AMP runner with F=1 + Onsager."
     )
-    parser.add_argument("--N1", type=int, default=2520)
-    parser.add_argument("--N2", type=int, default=2520)
+    parser.add_argument("--N1", type=int, default=1000)
+    parser.add_argument("--N2", type=int, default=1000)
     parser.add_argument("--M", type=int, default=200)
-    parser.add_argument("--alpha-start", type=float, default=0.5)
-    parser.add_argument("--alpha-stop", type=float, default=3.0)
-    parser.add_argument("--alpha-step", type=float, default=0.1)
-    parser.add_argument("--max-steps", type=int, default=500)
+    parser.add_argument("--alpha-start", type=float, default=0.1)
+    parser.add_argument("--alpha-stop", type=float, default=4.0)
+    parser.add_argument("--alpha-step", type=float, default=0.2)
+    parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--damping", type=float, default=0.5)
     parser.add_argument(
         "--damping-schedule",
@@ -115,14 +116,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--beta-scale", type=float, default=1e-3)
     parser.add_argument("--beta-max", type=float, default=0.5)
-    parser.add_argument("--noise-var", type=float, default=1e-10)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-replicas", type=int, default=30)
+    parser.add_argument("--noise-var", type=float, default=0)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--num-replicas", type=int, default=20)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=3,
+        default=4,
         help="Number of parallel worker processes (default: CPU count).",
     )
     return parser.parse_args()
@@ -150,7 +151,11 @@ def save_config(
         "beta_scale": args.beta_scale,
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
-        "seed": args.seed,
+        "teacher_seed": 1,
+        "graph_seed": 1,
+        "noise_seed": 1,
+        "student_seed_base": 100,
+        "legacy_cli_seed": args.seed,
         "num_replicas": args.num_replicas,
         "convergence_threshold": args.convergence_threshold,
         "num_workers": args.num_workers,
@@ -271,6 +276,10 @@ def main() -> None:
     else:
         print(f"Steps: {args.max_steps}, Damping: {args.damping}")
     print(f"Replicas per alpha: {args.num_replicas}")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_id")
+    if args.seed != 1:
+        print(f"Legacy CLI seed argument {args.seed} is ignored by this fixed seed policy.")
     print()
 
     # Create results directory
@@ -294,6 +303,35 @@ def main() -> None:
     )
 
     use_step_damping = args.damping_schedule == "beta"
+    shared_seed = 1
+    student_seed_base = 100
+
+    from terao_gamp_gaussian.F_1_onsager_scaler_var_cosine.core import (
+        prepare_global_shared_data,
+        prepare_shared_alpha_data,
+    )
+
+    global_data = prepare_global_shared_data(
+        device=torch.device(device),
+        seed=shared_seed,
+        N1=args.N1,
+        N2=args.N2,
+        M=args.M,
+        noise_var=args.noise_var,
+    )
+    shared_data_by_alpha = {
+        float(alpha): prepare_shared_alpha_data(
+            alpha=float(alpha),
+            device=torch.device(device),
+            seed=shared_seed,
+            N1=args.N1,
+            N2=args.N2,
+            M=args.M,
+            noise_var=args.noise_var,
+            global_data=global_data,
+        )
+        for alpha in alphas
+    }
 
     tasks = []
     for alpha in alphas:
@@ -302,7 +340,7 @@ def main() -> None:
                 {
                     "alpha": float(alpha),
                     "replica_id": replica_id,
-                    "seed": args.seed + replica_id * 1000,
+                    "seed": student_seed_base + replica_id,
                     "device": device,
                     "N1": args.N1,
                     "N2": args.N2,
@@ -314,6 +352,7 @@ def main() -> None:
                     "damping_beta_max": args.beta_max,
                     "noise_var": args.noise_var,
                     "convergence_threshold": args.convergence_threshold,
+                    "shared_data": shared_data_by_alpha[float(alpha)],
                 }
             )
 

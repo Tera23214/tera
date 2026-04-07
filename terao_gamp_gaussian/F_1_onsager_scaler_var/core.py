@@ -240,6 +240,112 @@ def compute_step_damping(
     return float(max(0.0, min(1.0, damping_t)))
 
 
+def prepare_global_shared_data(
+    device: torch.device,
+    seed: int = 1,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 10,
+    noise_var: float = 1e-10,
+    lam: float = 1.0,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare teacher matrices and a full-grid noise field once for the
+    whole simulation.
+    """
+    scale = lam / math.sqrt(M)
+
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+
+    torch.manual_seed(seed)
+    noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "scale": scale,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "noise_full": noise_full,
+    }
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int = 1,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 10,
+    noise_var: float = 1e-10,
+    lam: float = 1.0,
+    global_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph and observed targets once for a single alpha.
+    """
+    if global_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+        )
+
+    graph = BiregularGraph()
+    i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(N1, N2, M, alpha, device, seed)
+
+    scale = float(global_data["scale"])
+    y_clean = torch.empty(E, device=device, dtype=torch.float32)
+    y_noisy = torch.empty(E, device=device, dtype=torch.float32)
+    W_teacher = global_data["W_teacher"]
+    X_teacher = global_data["X_teacher"]
+    noise_full = global_data["noise_full"]
+
+    if E == 0:
+        return {
+            "alpha": alpha,
+            "alpha2": alpha2,
+            "E": E,
+            "C1": C1,
+            "C2": C2,
+            "scale": scale,
+            "i_idx": i_idx,
+            "j_idx": j_idx,
+            "W_teacher": W_teacher,
+            "X_teacher": X_teacher,
+            "Y_clean": y_clean,
+            "Y_noisy": y_noisy,
+        }
+
+    i_idx_long = i_idx.long()
+    j_idx_long = j_idx.long()
+    W_sel = W_teacher[i_idx_long, :]
+    X_sel = X_teacher[:, j_idx_long].T
+    y_clean = scale * (W_sel * X_sel).sum(dim=1)
+    y_noisy = y_clean + noise_full[i_idx_long, j_idx_long]
+
+    return {
+        "alpha": alpha,
+        "alpha2": alpha2,
+        "E": E,
+        "C1": C1,
+        "C2": C2,
+        "scale": scale,
+        "i_idx": i_idx,
+        "j_idx": j_idx,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "Y_clean": y_clean,
+        "Y_noisy": y_noisy,
+    }
+
+
 def train_single_replica(
     alpha: float,
     device: torch.device,
@@ -258,6 +364,7 @@ def train_single_replica(
     return_history: bool = False,
     loss_eval_interval: int = 100,
     early_stop: bool = True,
+    shared_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
     Train a single replica using G-AMP with F = 1 and Onsager correction.
@@ -269,30 +376,42 @@ def train_single_replica(
     
     This version includes proper Onsager correction using t-1 messages.
     """
-    # Generate observation graph (BiregularGraph for Dense Limit)
-    graph = BiregularGraph()
-    i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(N1, N2, M, alpha, device, seed)
-    
+    if shared_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=1,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+        )
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=1,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+            global_data=global_data,
+        )
+
+    E = int(shared_data["E"])
     if E == 0:
         return 0.0, 0.0, 0
-    
-    # Generate teacher matrices W ~ N(0,1), X ~ N(0,1)
-    torch.manual_seed(seed)
-    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
-    
-    # Generate observations: Y = (λ/√M) Σ_μ W X
-    # Note: F=1, so no F factor
-    scale = lam / math.sqrt(M)
-    W_sel = W_teacher[i_idx.long(), :]
-    X_sel = X_teacher[:, j_idx.long()].T
-    Y = scale * (W_sel * X_sel).sum(dim=1)
-    
-    # Add noise
-    torch.manual_seed(seed + 1000)
-    noise = torch.randn_like(Y) * math.sqrt(noise_var)
-    Y_noisy = Y + noise
-    
+
+    i_idx = shared_data["i_idx"]
+    j_idx = shared_data["j_idx"]
+    W_teacher = shared_data["W_teacher"]
+    X_teacher = shared_data["X_teacher"]
+    Y = shared_data["Y_clean"]
+    Y_noisy = shared_data["Y_noisy"]
+    scale = float(shared_data["scale"])
+    N1, M = W_teacher.shape
+    N2 = X_teacher.shape[1]
+
     torch.manual_seed(seed + 2000)
     m_W = torch.randn(N1, M, device=device)
     v_W = torch.ones(N1, M, device=device)
@@ -307,8 +426,9 @@ def train_single_replica(
     final_loss = 0.0
     steps_taken = max_steps
     prev_loss = float('inf')
-    history = {"steps": [], "loss": [], "qy": [], "damping": []}
+    history = {"steps": [], "loss": [], "loss_clean": [], "qy": [], "damping": []}
     history_loss_tensors = []
+    history_clean_loss_tensors = []
     history_qy_values = []
     
     for step in range(max_steps):
@@ -340,6 +460,9 @@ def train_single_replica(
             loss_tensor = compute_observed_loss(
                 m_W, m_X, Y_noisy, i_idx, j_idx, scale
             )
+            clean_loss_tensor = compute_observed_loss(
+                m_W, m_X, Y, i_idx, j_idx, scale
+            )
 
             if return_history:
                 qy_step = compute_qy(
@@ -350,6 +473,7 @@ def train_single_replica(
                 )
                 history["steps"].append(step + 1)
                 history_loss_tensors.append(loss_tensor.detach())
+                history_clean_loss_tensors.append(clean_loss_tensor.detach())
                 history_qy_values.append(qy_step)
                 history["damping"].append(damping_t)
 
@@ -377,6 +501,7 @@ def train_single_replica(
     if return_history:
         if history_loss_tensors:
             history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
+            history["loss_clean"] = torch.stack(history_clean_loss_tensors).cpu().tolist()
             history["qy"] = history_qy_values
             if not early_stop:
                 final_loss = float(history["loss"][-1])

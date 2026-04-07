@@ -9,6 +9,7 @@ reused across replicas, while replicas differ only in student initialization.
 from .core import (
     compute_y_cosine_similarity,
     gamp_step_with_onsager_dense,
+    prepare_global_shared_data,
     prepare_shared_alpha_data,
     train_single_replica,
 )
@@ -16,6 +17,7 @@ from .core import (
 __all__ = [
     "compute_y_cosine_similarity",
     "gamp_step_with_onsager_dense",
+    "prepare_global_shared_data",
     "prepare_shared_alpha_data",
     "train_single_replica",
 ]

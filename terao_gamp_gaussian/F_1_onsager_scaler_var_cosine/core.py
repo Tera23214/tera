@@ -241,10 +241,9 @@ def compute_step_damping(
     return float(max(0.0, min(1.0, damping_t)))
 
 
-def prepare_shared_alpha_data(
-    alpha: float,
+def prepare_global_shared_data(
     device: torch.device,
-    seed: int,
+    seed: int = 1,
     N1: int = 1000,
     N2: int = 1000,
     M: int = 10,
@@ -252,19 +251,68 @@ def prepare_shared_alpha_data(
     lam: float = 1.0,
 ) -> dict[str, torch.Tensor | float | int]:
     """
-    Prepare graph, teacher, and observations once for a single alpha.
-
-    The returned tensors are shared across replicas. Replica-to-replica
-    variation should come only from the student initialization.
+    Prepare teacher matrices and a full-grid noise field once for the
+    whole simulation.
     """
+    scale = lam / math.sqrt(M)
+
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+
+    torch.manual_seed(seed)
+    noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "scale": scale,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "noise_full": noise_full,
+    }
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int = 1,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 10,
+    noise_var: float = 1e-10,
+    lam: float = 1.0,
+    global_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph and observed targets once for a single alpha.
+
+    Teacher matrices and noise are shared across the whole simulation.
+    Replica-to-replica variation should come only from the student
+    initialization.
+    """
+    if global_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+        )
+
     graph = BiregularGraph()
     i_idx, j_idx, E, C1, C2, alpha2 = graph.generate(
         N1, N2, M, alpha, device, seed
     )
 
-    scale = lam / math.sqrt(M)
+    scale = float(global_data["scale"])
     y_clean = torch.empty(E, device=device, dtype=torch.float32)
     y_noisy = torch.empty(E, device=device, dtype=torch.float32)
+    W_teacher = global_data["W_teacher"]
+    X_teacher = global_data["X_teacher"]
+    noise_full = global_data["noise_full"]
 
     if E == 0:
         return {
@@ -276,23 +324,18 @@ def prepare_shared_alpha_data(
             "scale": scale,
             "i_idx": i_idx,
             "j_idx": j_idx,
-            "W_teacher": torch.empty((N1, M), dtype=torch.float32, device=device),
-            "X_teacher": torch.empty((M, N2), dtype=torch.float32, device=device),
+            "W_teacher": W_teacher,
+            "X_teacher": X_teacher,
             "Y_clean": y_clean,
             "Y_noisy": y_noisy,
         }
 
-    torch.manual_seed(seed)
-    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
-
-    W_sel = W_teacher[i_idx.long(), :]
-    X_sel = X_teacher[:, j_idx.long()].T
+    i_idx_long = i_idx.long()
+    j_idx_long = j_idx.long()
+    W_sel = W_teacher[i_idx_long, :]
+    X_sel = X_teacher[:, j_idx_long].T
     y_clean = scale * (W_sel * X_sel).sum(dim=1)
-
-    torch.manual_seed(seed + 1000)
-    noise = torch.randn_like(y_clean) * math.sqrt(noise_var)
-    y_noisy = y_clean + noise
+    y_noisy = y_clean + noise_full[i_idx_long, j_idx_long]
 
     return {
         "alpha": alpha,
@@ -341,15 +384,25 @@ def train_single_replica(
     This version includes proper Onsager correction using t-1 messages.
     """
     if shared_data is None:
-        shared_data = prepare_shared_alpha_data(
-            alpha=alpha,
+        global_data = prepare_global_shared_data(
             device=device,
-            seed=seed,
+            seed=1,
             N1=N1,
             N2=N2,
             M=M,
             noise_var=noise_var,
             lam=lam,
+        )
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=1,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            lam=lam,
+            global_data=global_data,
         )
 
     E = int(shared_data["E"])

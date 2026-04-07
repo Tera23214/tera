@@ -29,6 +29,7 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.Dence_scaler_var_cosine.core import (
+    prepare_global_shared_data,
     prepare_shared_alpha_data,
     train_single_replica,
 )
@@ -36,12 +37,12 @@ from terao_gamp_gaussian.Dence_scaler_var_cosine.core import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot loss vs step for fixed alpha.")
-    parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--N1", type=int, default=1000)
-    parser.add_argument("--N2", type=int, default=1000)
-    parser.add_argument("--M", type=int, default=100)
-    parser.add_argument("--max-steps", type=int, default=800)
-    parser.add_argument("--damping", type=float, default=0.5)
+    parser.add_argument("--alpha", type=float, default=5.0)
+    parser.add_argument("--N1", type=int, default=5000)
+    parser.add_argument("--N2", type=int, default=5000)
+    parser.add_argument("--M", type=int, default=300)
+    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--damping", type=float, default=0)
     parser.add_argument(
         "--damping-schedule",
         type=str,
@@ -49,11 +50,11 @@ def parse_args() -> argparse.Namespace:
         default="beta",
     )
     parser.add_argument("--beta-scale", type=float, default=1e-3)
-    parser.add_argument("--beta-max", type=float, default=0.5)
-    parser.add_argument("--noise-var", type=float, default=1e-10)
+    parser.add_argument("--beta-max", type=float, default=0.7)
+    parser.add_argument("--noise-var", type=float, default=1e-6)
     parser.add_argument("--lam", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-replicas", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--num-replicas", type=int, default=2)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
 
@@ -84,6 +85,7 @@ def save_config(
     device: torch.device,
     shared_data: dict[str, torch.Tensor | float | int],
 ) -> None:
+    student_seed_base = 100
     config = {
         "algorithm": "gamp_Dence_scaler_var_cosine_loss_vs_step",
         "backend": "dense_mask",
@@ -99,7 +101,10 @@ def save_config(
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
         "lam": args.lam,
-        "seed": args.seed,
+        "teacher_seed": args.seed,
+        "graph_seed": args.seed,
+        "noise_seed": args.seed,
+        "student_seed_base": student_seed_base,
         "num_replicas": args.num_replicas,
         "convergence_threshold": args.convergence_threshold,
         "loss_eval_interval": 1,
@@ -109,7 +114,8 @@ def save_config(
         "num_observed_entries": int(shared_data["E"]),
         "C1": int(shared_data["C1"]),
         "C2": int(shared_data["C2"]),
-        "shared_per_alpha_graph_noise": True,
+        "shared_teacher_noise_global": True,
+        "shared_graph_per_alpha": True,
         "replica_variation": "student_initialization_only",
         "device": str(device),
     }
@@ -340,6 +346,7 @@ def plot_cosine_similarity(
 def main() -> None:
     args = parse_args()
     device = detect_device()
+    student_seed_base = 100
 
     print("=" * 60)
     print("Loss vs Step for Dense-mask G-AMP with F=1 + Onsager Correction")
@@ -354,11 +361,22 @@ def main() -> None:
         )
     else:
         print(f"max_steps={args.max_steps}, damping={args.damping}")
-    print(f"replicas={args.num_replicas}, seed={args.seed}")
-    print("Shared per alpha: graph / teacher / noisy observation")
+    print(f"replicas={args.num_replicas}, teacher/graph/noise seed={args.seed}")
+    print(f"Student seed rule: {student_seed_base} + replica_index")
+    print("Shared across run: teacher / noisy field")
+    print("Shared per alpha: graph")
     print("Replica-specific: student initialization only")
     print()
 
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=args.seed,
+        N1=args.N1,
+        N2=args.N2,
+        M=args.M,
+        noise_var=args.noise_var,
+        lam=args.lam,
+    )
     shared_data = prepare_shared_alpha_data(
         alpha=args.alpha,
         device=device,
@@ -368,6 +386,7 @@ def main() -> None:
         M=args.M,
         noise_var=args.noise_var,
         lam=args.lam,
+        global_data=global_data,
     )
     num_observations = int(shared_data["E"])
 
@@ -397,7 +416,7 @@ def main() -> None:
     total_start = time.time()
 
     for replica_idx in range(args.num_replicas):
-        seed = args.seed + replica_idx * 1000
+        seed = student_seed_base + replica_idx
         replica_start = time.time()
 
         cosine_similarity, final_loss, steps_taken, history = train_single_replica(

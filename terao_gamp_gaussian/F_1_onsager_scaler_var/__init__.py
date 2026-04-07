@@ -7,10 +7,19 @@ This module implements G-AMP with:
 - BiregularGraph for Dense Limit
 """
 
-from .core import train_single_replica, gamp_step_with_onsager, f_input, g_out
+from .core import (
+    train_single_replica,
+    prepare_global_shared_data,
+    prepare_shared_alpha_data,
+    gamp_step_with_onsager,
+    f_input,
+    g_out,
+)
 
 __all__ = [
     'train_single_replica',
+    'prepare_global_shared_data',
+    'prepare_shared_alpha_data',
     'gamp_step_with_onsager',
     'f_input',
     'g_out',

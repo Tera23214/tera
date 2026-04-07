@@ -28,7 +28,11 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.F_1_onsager_scaler_var_cosine.core import train_single_replica
+from terao_gamp_gaussian.F_1_onsager_scaler_var_cosine.core import (
+    prepare_global_shared_data,
+    prepare_shared_alpha_data,
+    train_single_replica,
+)
 
 #set the parameters for the experiment
 def parse_args() -> argparse.Namespace:
@@ -48,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-scale", type=float, default=1e-3)
     parser.add_argument("--beta-max", type=float, default=0.5)
     parser.add_argument("--noise-var", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=1)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
@@ -94,7 +98,11 @@ def save_config(results_dir: Path, args: argparse.Namespace, device: torch.devic
         "beta_scale": args.beta_scale,
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
-        "seed": args.seed,
+        "teacher_seed": 1,
+        "graph_seed": 1,
+        "noise_seed": 1,
+        "student_seed_base": 100,
+        "legacy_cli_seed": args.seed,
         "num_replicas": args.num_replicas,
         "convergence_threshold": args.convergence_threshold,
         "loss_eval_interval": 1,
@@ -102,6 +110,8 @@ def save_config(results_dir: Path, args: argparse.Namespace, device: torch.devic
         "loss_definition": "sum_squared_error_on_observed_entries",
         "clean_loss_definition": "sum_squared_error_on_observed_entries_against_noise_free_targets",
         "evaluation_metric": "cosine_similarity_in_Y_space",
+        "shared_teacher_noise_global": True,
+        "shared_graph_per_alpha": True,
         "num_observed_entries": num_observations,
         "device": str(device),
     }
@@ -455,7 +465,11 @@ def main() -> None:
         )
     else:
         print(f"max_steps={args.max_steps}, damping={args.damping}")
-    print(f"replicas={args.num_replicas}, seed={args.seed}")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_index")
+    if args.seed != 1:
+        print(f"Legacy CLI seed argument {args.seed} is ignored by this fixed seed policy.")
+    print(f"replicas={args.num_replicas}")
     print()
 
     num_observations = count_observed_edges(args.alpha, args.N1, args.N2, args.M)
@@ -485,9 +499,29 @@ def main() -> None:
     convergence_steps = []
 
     total_start = time.time()
+    shared_seed = 1
+    student_seed_base = 100
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=shared_seed,
+        N1=args.N1,
+        N2=args.N2,
+        M=args.M,
+        noise_var=args.noise_var,
+    )
+    shared_data = prepare_shared_alpha_data(
+        alpha=args.alpha,
+        device=device,
+        seed=shared_seed,
+        N1=args.N1,
+        N2=args.N2,
+        M=args.M,
+        noise_var=args.noise_var,
+        global_data=global_data,
+    )
 
     for replica_idx in range(args.num_replicas):
-        seed = args.seed + replica_idx * 1000
+        seed = student_seed_base + replica_idx
         replica_start = time.time()
 
         cosine_similarity, final_loss, steps_taken, history = train_single_replica(
@@ -507,6 +541,7 @@ def main() -> None:
             return_history=True,
             loss_eval_interval=1,
             early_stop=False,
+            shared_data=shared_data,
         )
 
         runtime = time.time() - replica_start

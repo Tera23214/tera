@@ -27,28 +27,30 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.Dence_scaler_var_cosine.core import (
+    prepare_global_shared_data,
     prepare_shared_alpha_data,
     train_single_replica,
 )
 
 
-N1 = 220
-N2 = 220
+N1 = 2000
+N2 = 2000
 M = 200
 
-ALPHA_START = 0.5
-ALPHA_STOP = 3.0
-ALPHA_STEP = 0.1
+ALPHA_START = 0.1
+ALPHA_STOP = 8.0
+ALPHA_STEP = 1
 
-MAX_STEPS = 500
-DAMPING = 0.5
+MAX_STEPS = 2000
+DAMPING = 0.7
 USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
 DAMPING_BETA_MAX = DAMPING
-NOISE_VAR = 1e-10
+NOISE_VAR = 0
 LAM = 1.0
-SEED = 42
-NUM_REPLICAS = 30
+SHARED_SEED = 1
+STUDENT_SEED_BASE = 100
+NUM_REPLICAS = 1
 CONVERGENCE_THRESHOLD = 1e-6
 
 
@@ -83,7 +85,10 @@ if __name__ == "__main__":
     else:
         print(f"Steps: {MAX_STEPS}, Damping: {DAMPING}")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
-    print("Shared per alpha: graph / teacher / noisy observation")
+    print(f"Teacher / graph / noise seed: {SHARED_SEED}")
+    print(f"Student seed rule: {STUDENT_SEED_BASE} + replica_id")
+    print("Shared across run: teacher / noisy field")
+    print("Shared per alpha: graph")
     print("Replica-specific: student initialization only")
     print()
 
@@ -112,14 +117,18 @@ if __name__ == "__main__":
         "damping_beta_max": DAMPING_BETA_MAX,
         "noise_var": NOISE_VAR,
         "lam": LAM,
-        "seed": SEED,
+        "teacher_seed": SHARED_SEED,
+        "graph_seed": SHARED_SEED,
+        "noise_seed": SHARED_SEED,
+        "student_seed_base": STUDENT_SEED_BASE,
         "num_replicas": NUM_REPLICAS,
         "convergence_threshold": CONVERGENCE_THRESHOLD,
         "device": str(device),
         "onsager_correction": True,
         "F_type": "constant_1",
         "evaluation_metric": "cosine_similarity_in_Y_space",
-        "shared_per_alpha_graph_noise": True,
+        "shared_teacher_noise_global": True,
+        "shared_graph_per_alpha": True,
         "replica_variation": "student_initialization_only",
     }
     config_path = results_dir / "config.yaml"
@@ -133,18 +142,27 @@ if __name__ == "__main__":
     start_time = time.time()
     total_tasks = len(alphas) * NUM_REPLICAS
     completed = 0
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=SHARED_SEED,
+        N1=N1,
+        N2=N2,
+        M=M,
+        noise_var=NOISE_VAR,
+        lam=LAM,
+    )
 
     for alpha_id, alpha in enumerate(alphas):
-        shared_seed = SEED + alpha_id * 10000
         shared_data = prepare_shared_alpha_data(
             alpha=alpha,
             device=device,
-            seed=shared_seed,
+            seed=SHARED_SEED,
             N1=N1,
             N2=N2,
             M=M,
             noise_var=NOISE_VAR,
             lam=LAM,
+            global_data=global_data,
         )
 
         cosine_similarity_values = []
@@ -152,7 +170,7 @@ if __name__ == "__main__":
         steps_values = []
 
         for replica_id in range(NUM_REPLICAS):
-            replica_seed = SEED + replica_id * 1000
+            replica_seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
 
             cosine_similarity, final_loss, steps_taken = train_single_replica(

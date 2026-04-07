@@ -32,6 +32,7 @@ from terao_gd.gd_cosine_minibatch.gd import (
     compute_predictions,
     compute_y_cosine_similarity,
     normalize_to_unit_variance,
+    prepare_global_shared_data,
     prepare_shared_alpha_data,
     sample_minibatch_positions,
     sgd_step_W,
@@ -62,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--noise-var", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=3)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     parser.add_argument("--record-interval", type=int, default=5)
@@ -113,7 +114,11 @@ def save_config(
         "batch_size": args.batch_size,
         "num_observed": num_observed,
         "noise_var": args.noise_var,
-        "seed": args.seed,
+        "teacher_seed": 1,
+        "graph_seed": 1,
+        "noise_seed": 1,
+        "student_seed_base": 100,
+        "legacy_cli_seed": args.seed,
         "num_replicas": args.num_replicas,
         "convergence_threshold": args.convergence_threshold,
         "record_interval": args.record_interval,
@@ -123,6 +128,7 @@ def save_config(
         "sampling": "with_replacement",
         "lr_auto_formula": "lr_base / sqrt(batch_size)",
         "shared_per_alpha_graph_noise": True,
+        "shared_teacher_noise_global": True,
         "replica_variation": "student_initialization_only",
     }
 
@@ -453,14 +459,25 @@ def main() -> None:
     args = parse_args()
     device = detect_device()
 
-    shared_data = prepare_shared_alpha_data(
-        alpha=args.alpha,
+    shared_seed = 1
+    student_seed_base = 100
+    global_data = prepare_global_shared_data(
         device=device,
-        seed=args.seed,
+        seed=shared_seed,
         N1=args.N1,
         N2=args.N2,
         M=args.M,
         noise_var=args.noise_var,
+    )
+    shared_data = prepare_shared_alpha_data(
+        alpha=args.alpha,
+        device=device,
+        seed=shared_seed,
+        N1=args.N1,
+        N2=args.N2,
+        M=args.M,
+        noise_var=args.noise_var,
+        global_data=global_data,
     )
     num_observed = int(shared_data["num_observed"])
     lr = resolve_lr(args)
@@ -477,9 +494,13 @@ def main() -> None:
         f"noise_var={args.noise_var:.6e}, record_interval={args.record_interval}"
     )
     print("Sampling: with replacement from observed edges")
-    print("Shared per alpha: graph / teacher / noisy observations")
-    print("Replica-specific: student initialization only")
-    print(f"replicas={args.num_replicas}, seed={args.seed}")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_index")
+    print("Shared per alpha: graph / observed targets")
+    print("Shared across all alphas: teacher / full noise field")
+    if args.seed != 1:
+        print(f"Legacy CLI seed argument {args.seed} is ignored by this fixed seed policy.")
+    print(f"replicas={args.num_replicas}")
     print()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -507,7 +528,7 @@ def main() -> None:
     total_start = time.time()
 
     for replica_idx in range(args.num_replicas):
-        seed = args.seed + replica_idx * 1000
+        seed = student_seed_base + replica_idx
         replica_start = time.time()
 
         cosine_similarity, history = run_single_replica_with_history(

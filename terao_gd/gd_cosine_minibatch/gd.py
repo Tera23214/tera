@@ -36,7 +36,7 @@ N2 = 2000
 M = 200
 
 ALPHA_START = 0.1
-ALPHA_STOP = 8.0
+ALPHA_STOP = 5.0
 ALPHA_STEP = 0.2
 
 MAX_STEPS = 15000
@@ -44,7 +44,8 @@ LR_BASE = 0.1
 BATCH_SIZE = 3000
 LR = LR_BASE / math.sqrt(BATCH_SIZE)
 NOISE_VAR = 0
-SEED = 42
+SHARED_SEED = 1
+STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 10
 CONVERGENCE_THRESHOLD = 1e-6
 LOSS_EVAL_INTERVAL = 500
@@ -191,20 +192,62 @@ def compute_y_cosine_similarity(
     return (inner / denom).item()
 
 
-def prepare_shared_alpha_data(
-    alpha: float,
+def prepare_global_shared_data(
     device: torch.device,
-    seed: int,
+    seed: int = 1,
     N1: int = 1000,
     N2: int = 1000,
     M: int = 200,
     noise_var: float = 0.0,
 ) -> dict[str, torch.Tensor | float | int]:
     """
-    Prepare graph, teacher, and observed values once for a single alpha.
+    Prepare teacher matrices and a full-grid noise field once for the whole
+    simulation.
     """
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
+
+    torch.manual_seed(seed)
+    noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "noise_full": noise_full,
+    }
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int = 1,
+    N1: int = 1000,
+    N2: int = 1000,
+    M: int = 200,
+    noise_var: float = 0.0,
+    global_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph and observed values once for a single alpha.
+    """
+    if global_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+        )
+
     graph = RandomGraph()
     i_idx, j_idx, num_observed = graph.generate(N1, N2, M, alpha, device, seed)
+    W_teacher = global_data["W_teacher"]
+    X_teacher = global_data["X_teacher"]
+    noise_full = global_data["noise_full"]
 
     if num_observed == 0:
         return {
@@ -212,20 +255,14 @@ def prepare_shared_alpha_data(
             "num_observed": 0,
             "i_idx": i_idx,
             "j_idx": j_idx,
-            "W_teacher": torch.empty((N1, M), dtype=torch.float32, device=device),
-            "X_teacher": torch.empty((M, N2), dtype=torch.float32, device=device),
+            "W_teacher": W_teacher,
+            "X_teacher": X_teacher,
             "Y_clean": torch.empty(0, dtype=torch.float32, device=device),
             "Y_train": torch.empty(0, dtype=torch.float32, device=device),
         }
 
-    torch.manual_seed(seed)
-    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
-    X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
     Y_clean = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
-
-    torch.manual_seed(seed + 1000)
-    noise = torch.randn_like(Y_clean) * math.sqrt(noise_var)
-    Y_train = Y_clean + noise
+    Y_train = Y_clean + noise_full[i_idx.long(), j_idx.long()]
 
     return {
         "alpha": alpha,
@@ -258,14 +295,23 @@ def train_single_replica(
     Train a single replica for a given alpha using alternating mini-batch SGD.
     """
     if shared_data is None:
-        shared_data = prepare_shared_alpha_data(
-            alpha=alpha,
+        global_data = prepare_global_shared_data(
             device=device,
-            seed=seed,
+            seed=1,
             N1=N1,
             N2=N2,
             M=M,
             noise_var=noise_var,
+        )
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=1,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            global_data=global_data,
         )
 
     num_observed = int(shared_data["num_observed"])
@@ -331,6 +377,53 @@ def train_single_replica(
     return cosine_similarity, final_loss, steps_taken
 
 
+def save_metrics_csv(
+    results_dir: Path,
+    results: dict[float, dict[str, float | list[float]]],
+    alphas_list: list[float],
+    num_replicas: int,
+) -> None:
+    csv_path = results_dir / "metrics.csv"
+    with open(csv_path, "w") as f:
+        header = (
+            "alpha,cosine_similarity_mean,cosine_similarity_std,"
+            "Loss_mean,Loss_std,Steps_mean"
+        )
+        for i in range(num_replicas):
+            header += f",cosine_similarity_replica_{i},loss_replica_{i}"
+        f.write(header + "\n")
+
+        for alpha in alphas_list:
+            r = results[alpha]
+            line = (
+                f"{alpha},{r['cosine_similarity_mean']},"
+                f"{r['cosine_similarity_std']},{r['loss_mean']},"
+                f"{r['loss_std']},{r['steps_mean']}"
+            )
+            for cosine_similarity_value, loss_v in zip(
+                r["cosine_similarity_values"], r["loss_values"]
+            ):
+                line += f",{cosine_similarity_value},{loss_v}"
+            f.write(line + "\n")
+
+
+def save_replica_summary(
+    results_dir: Path,
+    replica_records: list[dict[str, float | int]],
+) -> None:
+    summary_path = results_dir / "replica_summary.csv"
+    with open(summary_path, "w") as f:
+        f.write(
+            "alpha,replica,seed,runtime_sec,final_loss,steps_taken,cosine_similarity\n"
+        )
+        for record in replica_records:
+            f.write(
+                f"{record['alpha']},{record['replica']},{record['seed']},"
+                f"{record['runtime_sec']:.4f},{record['final_loss']:.10e},"
+                f"{record['steps_taken']},{record['cosine_similarity']:.10e}\n"
+            )
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -356,8 +449,10 @@ if __name__ == "__main__":
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
     print(f"Steps: {MAX_STEPS}, LR={LR}, Batch={BATCH_SIZE}")
     print("Sampling: with replacement from observed edges")
-    print("Shared per alpha: graph / teacher / observations")
-    print("Replica-specific: student initialization only")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_id")
+    print("Shared per alpha: graph / observed targets")
+    print("Shared across all alphas: teacher / full noise field")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
     print()
 
@@ -383,13 +478,17 @@ if __name__ == "__main__":
         "batch_size": BATCH_SIZE,
         "lr_auto_formula": "lr_base / sqrt(batch_size)",
         "noise_var": NOISE_VAR,
-        "seed": SEED,
+        "teacher_seed": SHARED_SEED,
+        "graph_seed": SHARED_SEED,
+        "noise_seed": SHARED_SEED,
+        "student_seed_base": STUDENT_SEED_BASE,
         "num_replicas": NUM_REPLICAS,
         "convergence_threshold": CONVERGENCE_THRESHOLD,
         "device": str(device),
         "evaluation_metric": "cosine_similarity_in_Y_space",
         "sampling": "with_replacement",
         "shared_per_alpha_graph_noise": True,
+        "shared_teacher_noise_global": True,
         "replica_variation": "student_initialization_only",
     }
     config_path = results_dir / "config.yaml"
@@ -403,17 +502,26 @@ if __name__ == "__main__":
     start_time = time.time()
     total_tasks = len(alphas) * NUM_REPLICAS
     completed = 0
+    replica_records: list[dict[str, float | int]] = []
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=SHARED_SEED,
+        N1=N1,
+        N2=N2,
+        M=M,
+        noise_var=NOISE_VAR,
+    )
 
-    for alpha_id, alpha in enumerate(alphas):
-        shared_seed = SEED + alpha_id * 10000
+    for alpha in alphas:
         shared_data = prepare_shared_alpha_data(
             alpha=alpha,
             device=device,
-            seed=shared_seed,
+            seed=SHARED_SEED,
             N1=N1,
             N2=N2,
             M=M,
             noise_var=NOISE_VAR,
+            global_data=global_data,
         )
 
         cosine_similarity_values = []
@@ -421,7 +529,7 @@ if __name__ == "__main__":
         steps_values = []
 
         for replica_id in range(NUM_REPLICAS):
-            replica_seed = SEED + replica_id * 1000
+            replica_seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
             cosine_similarity, final_loss, steps_taken = train_single_replica(
                 alpha=alpha,
@@ -442,6 +550,17 @@ if __name__ == "__main__":
             loss_values.append(final_loss)
             steps_values.append(steps_taken)
             completed += 1
+            replica_records.append(
+                {
+                    "alpha": float(alpha),
+                    "replica": replica_id + 1,
+                    "seed": replica_seed,
+                    "runtime_sec": dt,
+                    "final_loss": final_loss,
+                    "steps_taken": steps_taken,
+                    "cosine_similarity": cosine_similarity,
+                }
+            )
             print(
                 f"α={alpha:.2f}, replica {replica_id + 1}/{NUM_REPLICAS}: "
                 f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
@@ -489,6 +608,11 @@ if __name__ == "__main__":
         std / math.sqrt(NUM_REPLICAS) for std in cosine_similarity_stds
     ]
 
+    save_metrics_csv(results_dir, results, alphas_list, NUM_REPLICAS)
+    save_replica_summary(results_dir, replica_records)
+    print(f"Metrics saved: {results_dir / 'metrics.csv'}")
+    print(f"Replica summary saved: {results_dir / 'replica_summary.csv'}")
+
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.errorbar(
         alphas_list,
@@ -522,30 +646,5 @@ if __name__ == "__main__":
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     print(f"Plot saved: {plot_path}")
     plt.show()
-
-    csv_path = results_dir / "metrics.csv"
-    with open(csv_path, "w") as f:
-        header = (
-            "alpha,cosine_similarity_mean,cosine_similarity_std,"
-            "Loss_mean,Loss_std,Steps_mean"
-        )
-        for i in range(NUM_REPLICAS):
-            header += f",cosine_similarity_replica_{i},loss_replica_{i}"
-        f.write(header + "\n")
-
-        for alpha in alphas_list:
-            r = results[alpha]
-            line = (
-                f"{alpha},{r['cosine_similarity_mean']},"
-                f"{r['cosine_similarity_std']},{r['loss_mean']},"
-                f"{r['loss_std']},{r['steps_mean']}"
-            )
-            for cosine_similarity_value, loss_v in zip(
-                r["cosine_similarity_values"], r["loss_values"]
-            ):
-                line += f",{cosine_similarity_value},{loss_v}"
-            f.write(line + "\n")
-
-    print(f"Metrics saved: {csv_path}")
     print(f"\nResults saved to: {results_dir}")
     print("Done!")
