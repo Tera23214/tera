@@ -30,13 +30,13 @@ from terao_gamp_gaussian.Dence_cosine.core import (
 
 N1 = 2000
 N2 = 2000
-M = 300
+M = 200
 
 ALPHA_START = 0.1
-ALPHA_STOP = 8.0
-ALPHA_STEP = 1
+ALPHA_STOP = 5.0
+ALPHA_STEP = 0.2
 
-MAX_STEPS = 1500
+MAX_STEPS = 2500
 DAMPING = 0.7       # Lower bound for step damping, or fixed damping if disabled
 USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
