@@ -1,0 +1,4 @@
+replica,seed,runtime_sec,final_loss,estimated_convergence_step,cosine_similarity
+1,100,35.9533,2.0505139828e+00,,8.4146648645e-02
+2,101,35.8385,1.3623749018e+00,,7.5990915298e-02
+3,102,35.7460,2.0757329464e+00,,9.7829870880e-02

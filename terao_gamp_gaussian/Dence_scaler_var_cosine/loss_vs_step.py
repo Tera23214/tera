@@ -37,7 +37,7 @@ from terao_gamp_gaussian.Dence_scaler_var_cosine.core import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot loss vs step for fixed alpha.")
-    parser.add_argument("--alpha", type=float, default=5.0)
+    parser.add_argument("--alpha", type=float, default=0.1)
     parser.add_argument("--N1", type=int, default=2000)
     parser.add_argument("--N2", type=int, default=2000)
     parser.add_argument("--M", type=int, default=200)
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise-var", type=float, default=1e-6)
     parser.add_argument("--lam", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--num-replicas", type=int, default=1)
+    parser.add_argument("--num-replicas", type=int, default=2)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
 
@@ -465,8 +465,8 @@ def main() -> None:
         )
         print(
             f"Replica {replica_idx + 1}/{args.num_replicas}: "
-                f"seed={seed}, final_loss={final_loss:.2e}, "
-            f"final_cosine_similarity={cosine_similarity:.4f}, "
+                f"seed={seed}, final_loss={final_loss:.10e}, "
+            f"final_cosine_similarity={cosine_similarity:.10f}, "
             f"estimated_convergence_step={convergence_text}, "
             f"steps_recorded={steps_taken}, runtime={runtime:.1f}s"
         )
@@ -513,8 +513,8 @@ def main() -> None:
     )
 
     print()
-    print(f"Mean final loss: {np.mean(final_losses):.2e}")
-    print(f"Mean cosine similarity: {np.mean(cosine_similarity_values):.4f}")
+    print(f"Mean final loss: {np.mean(final_losses):.10e}")
+    print(f"Mean cosine similarity: {np.mean(cosine_similarity_values):.10f}")
     print(f"Total runtime: {total_runtime:.1f}s")
     print(f"Results saved to: {results_dir}")
 

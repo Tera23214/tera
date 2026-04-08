@@ -1,11 +1,7 @@
 #!/usr/bin/env python
 """
-Dense-mask G-AMP simulation runner with scalar-variance Onsager correction and
-cosine-similarity evaluation.
-
-Graph / teacher / noisy observations are generated once per alpha and reused
-across replicas. Replica-to-replica variation comes only from student
-initialization.
+Dense-mask G-AMP simulation runner with F=1, exact Onsager correction,
+cosine-similarity evaluation, and informative student initialization.
 """
 
 import math
@@ -14,9 +10,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -26,57 +19,52 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.Dence_scaler_var_cosine.core import (
+from terao_gamp_gaussian.Dence_cosine.core_informative_init import (
     prepare_global_shared_data,
     prepare_shared_alpha_data,
     train_single_replica,
 )
 
 
-N1 = 3000
-N2 = 3000
-M = 300
+N1 = 2000
+N2 = 2000
+M = 200
 
-ALPHA_START = 3
+ALPHA_START = 0.1
 ALPHA_STOP = 5.0
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 2000
+MAX_STEPS = 2500
 DAMPING = 0.7
 USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
 DAMPING_BETA_MAX = DAMPING
 NOISE_VAR = 0
-LAM = 1.0
+INIT_SIGMA = 1.0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
-NUM_REPLICAS = 5
+NUM_REPLICAS = 1
 CONVERGENCE_THRESHOLD = 1e-6
-
-
-def select_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Dense-mask G-AMP (scalar var + cosine similarity)")
+    print("Dense-mask G-AMP with F=1 + Onsager Correction (Informative Init)")
     print("=" * 60)
 
-    device = select_device()
-    if device.type == "cuda":
-        print(f"Using: CUDA ({torch.cuda.get_device_name()})")
-    elif device.type == "mps":
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
         print("Using: Apple Silicon (MPS)")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using: CUDA ({torch.cuda.get_device_name()})")
     else:
+        device = torch.device("cpu")
         print("Using: CPU")
 
     print(f"Matrix: {N1}×{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
+    print(f"Informative init sigma: {INIT_SIGMA}")
     if USE_STEP_DAMPING:
         print(
             f"Steps: {MAX_STEPS}, Damping schedule: "
@@ -85,25 +73,26 @@ if __name__ == "__main__":
     else:
         print(f"Steps: {MAX_STEPS}, Damping: {DAMPING}")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
-    print(f"Teacher / graph / noise seed: {SHARED_SEED}")
-    print(f"Student seed rule: {STUDENT_SEED_BASE} + replica_id")
+    print("Teacher / graph / noise seed: 1")
+    print("Student seed rule: 100 + replica_id")
+    print("Student init: teacher + sigma * noise, noise ~ N(0, 1)")
+    print("Student init target: both W and X, then normalize to unit variance")
     print("Shared across run: teacher / noisy field")
     print("Shared per alpha: graph")
-    print("Replica-specific: student initialization only")
+    print("Replica-specific: informative student noise only")
     print()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir_name = (
-        f"{timestamp}_gamp_Dence_scaler_var_cosine_{N1}x{M}"
-        f"_alpha{ALPHA_START}-{ALPHA_STOP}"
+        f"{timestamp}_gamp_Dence_F_1_onsager_cosine_informative_sigma{INIT_SIGMA}_"
+        f"{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
     results_dir.mkdir(parents=True, exist_ok=True)
     print(f"Results directory: {results_dir}")
 
     config = {
-        "algorithm": "gamp_Dence_scaler_var_cosine",
-        "backend": "dense_mask",
+        "algorithm": "gamp_Dence_F_1_onsager_cosine_informative_init",
         "N1": N1,
         "N2": N2,
         "M": M,
@@ -116,7 +105,9 @@ if __name__ == "__main__":
         "damping_beta_scale": DAMPING_BETA_SCALE,
         "damping_beta_max": DAMPING_BETA_MAX,
         "noise_var": NOISE_VAR,
-        "lam": LAM,
+        "informative_init_sigma": INIT_SIGMA,
+        "student_initialization": "teacher_plus_sigma_times_gaussian_noise",
+        "student_initialization_noise_distribution": "N(0, 1)",
         "teacher_seed": SHARED_SEED,
         "graph_seed": SHARED_SEED,
         "noise_seed": SHARED_SEED,
@@ -129,7 +120,8 @@ if __name__ == "__main__":
         "evaluation_metric": "cosine_similarity_in_Y_space",
         "shared_teacher_noise_global": True,
         "shared_graph_per_alpha": True,
-        "replica_variation": "student_initialization_only",
+        "dense_mask": True,
+        "replica_variation": "informative_student_noise_only",
     }
     config_path = results_dir / "config.yaml"
     with open(config_path, "w") as f:
@@ -149,10 +141,9 @@ if __name__ == "__main__":
         N2=N2,
         M=M,
         noise_var=NOISE_VAR,
-        lam=LAM,
     )
 
-    for alpha_id, alpha in enumerate(alphas):
+    for alpha in alphas:
         shared_data = prepare_shared_alpha_data(
             alpha=alpha,
             device=device,
@@ -161,21 +152,20 @@ if __name__ == "__main__":
             N2=N2,
             M=M,
             noise_var=NOISE_VAR,
-            lam=LAM,
             global_data=global_data,
         )
-
         cosine_similarity_values = []
         loss_values = []
         steps_values = []
 
         for replica_id in range(NUM_REPLICAS):
-            replica_seed = STUDENT_SEED_BASE + replica_id
+            seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
 
             cosine_similarity, final_loss, steps_taken = train_single_replica(
+                alpha=alpha,
                 device=device,
-                seed=replica_seed,
+                seed=seed,
                 N1=N1,
                 N2=N2,
                 M=M,
@@ -186,7 +176,7 @@ if __name__ == "__main__":
                 damping_beta_max=DAMPING_BETA_MAX,
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
-                lam=LAM,
+                informative_init_sigma=INIT_SIGMA,
                 shared_data=shared_data,
             )
 
@@ -197,8 +187,8 @@ if __name__ == "__main__":
             completed += 1
 
             print(
-                f"α={alpha:.2f}, replica {replica_id + 1}/{NUM_REPLICAS}: "
-                f"CosSim={cosine_similarity:.10f}, Loss={final_loss:.10e}, "
+                f"α={alpha:.2f}, replica {replica_id+1}/{NUM_REPLICAS}: "
+                f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
                 f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
             )
 
@@ -222,8 +212,8 @@ if __name__ == "__main__":
         r = results[alpha]
         print(
             f"{alpha:6.2f} | "
-            f"{r['cosine_similarity_mean']:12.10f} ± {r['cosine_similarity_std']:<12.10f} | "
-            f"{r['loss_mean']:12.10e} ± {r['loss_std']:<12.10e} | {r['steps_mean']:8.0f}"
+            f"{r['cosine_similarity_mean']:8.4f} ± {r['cosine_similarity_std']:<8.4f} | "
+            f"{r['loss_mean']:8.2e} ± {r['loss_std']:<8.2e} | {r['steps_mean']:8.0f}"
         )
 
     print(f"\nTotal time: {total_time:.1f}s")
@@ -240,6 +230,7 @@ if __name__ == "__main__":
     ]
 
     fig, ax = plt.subplots(figsize=(10, 7))
+
     ax.errorbar(
         alphas_list,
         cosine_similarity_means,
@@ -251,13 +242,13 @@ if __name__ == "__main__":
         capsize=4,
         capthick=1.5,
         elinewidth=1.5,
-        label="Dense-mask G-AMP",
+        label="Dense-mask G-AMP (F=1 + Onsager)",
     )
     ax.set_xlabel(r"$\alpha$ (observation density)", fontsize=14)
     ax.set_ylabel("Cosine Similarity", fontsize=14)
     ax.set_title(
-        f"Dense-mask G-AMP (scalar var + cosine)\n"
-        f"({N1}×{N2}, M={M}, {MAX_STEPS} steps)",
+        f"Phase Transition (Dense-mask G-AMP with F=1 + Onsager + informative init)\n"
+        f"({N1}×{N2}, M={M}, sigma={INIT_SIGMA}, {MAX_STEPS} steps)",
         fontsize=16,
     )
     ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)
@@ -268,10 +259,11 @@ if __name__ == "__main__":
     ax.legend(loc="lower right", fontsize=12)
 
     plt.tight_layout()
+
     plot_path = plots_dir / "cosine_similarity_vs_alpha.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
     print(f"Plot saved: {plot_path}")
+    plt.show()
 
     csv_path = results_dir / "metrics.csv"
     with open(csv_path, "w") as f:

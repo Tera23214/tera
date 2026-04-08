@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
 Plot loss vs step for the dense-mask F=1 Onsager G-AMP experiment with
-cosine-similarity evaluation.
+informative student initialization and cosine-similarity evaluation.
 
 This script runs multiple replicas at fixed alpha and saves:
-- Mean loss vs step (linear scale)
+- Mean loss vs step
 - Mean log10(loss) vs step
 - CSV files with per-step histories and replica summaries
 """
@@ -28,18 +28,18 @@ import yaml
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.Dence_cosine.core import (
+from terao_gamp_gaussian.Dence_cosine.core_informative_init import (
     prepare_global_shared_data,
     prepare_shared_alpha_data,
     train_single_replica,
 )
 
-#set the parameters for the experiment
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot loss vs step for fixed alpha (dense mask)."
+        description="Plot loss vs step for fixed alpha with informative init."
     )
-    parser.add_argument("--alpha", type=float, default=3.0)
+    parser.add_argument("--alpha", type=float, default=2.0)
     parser.add_argument("--N1", type=int, default=2000)
     parser.add_argument("--N2", type=int, default=2000)
     parser.add_argument("--M", type=int, default=200)
@@ -53,9 +53,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--beta-scale", type=float, default=1e-3)
     parser.add_argument("--beta-max", type=float, default=0.5)
-    parser.add_argument("--noise-var", type=float, default=1e-5)
+    parser.add_argument("--noise-var", type=float, default=1e-5
+                        )
+    parser.add_argument("--init-sigma", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--num-replicas", type=int, default=1)
+    parser.add_argument("--num-replicas", type=int, default=3)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
 
@@ -82,7 +84,7 @@ def estimate_convergence_step(loss_history: np.ndarray, threshold: float) -> flo
 
 def save_config(results_dir: Path, args: argparse.Namespace, device: torch.device) -> None:
     config = {
-        "algorithm": "gamp_Dence_F_1_onsager_cosine_loss_vs_step",
+        "algorithm": "gamp_Dence_F_1_onsager_cosine_loss_vs_step_informative_init",
         "alpha": args.alpha,
         "N1": args.N1,
         "N2": args.N2,
@@ -93,6 +95,9 @@ def save_config(results_dir: Path, args: argparse.Namespace, device: torch.devic
         "beta_scale": args.beta_scale,
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
+        "informative_init_sigma": args.init_sigma,
+        "student_initialization": "teacher_plus_sigma_times_gaussian_noise",
+        "student_initialization_noise_distribution": "N(0, 1)",
         "teacher_seed": 1,
         "graph_seed": 1,
         "noise_seed": 1,
@@ -106,6 +111,7 @@ def save_config(results_dir: Path, args: argparse.Namespace, device: torch.devic
         "shared_teacher_noise_global": True,
         "shared_graph_per_alpha": True,
         "dense_mask": True,
+        "replica_variation": "informative_student_noise_only",
         "device": str(device),
     }
 
@@ -220,10 +226,10 @@ def plot_linear_loss(
     )
 
     ax.set_xlabel("Step", fontsize=13)
-    ax.set_ylabel("Observed MSE", fontsize=13)
+    ax.set_ylabel("Loss", fontsize=13)
     ax.set_title(
-        f"Observed MSE vs Step (alpha={args.alpha}, N1={args.N1}, "
-        f"N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
+        f"Loss vs Step (alpha={args.alpha}, sigma={args.init_sigma}, "
+        f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
     ax.grid(True, alpha=0.3)
@@ -265,9 +271,9 @@ def plot_log_loss(
     )
 
     ax.set_xlabel("Step", fontsize=13)
-    ax.set_ylabel("log10(Observed MSE)", fontsize=13)
+    ax.set_ylabel("log10(Loss)", fontsize=13)
     ax.set_title(
-        f"log10(Observed MSE) vs Step (alpha={args.alpha}, "
+        f"log10(Loss) vs Step (alpha={args.alpha}, sigma={args.init_sigma}, "
         f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
@@ -317,9 +323,8 @@ def plot_cosine_similarity(
     ax.set_xlabel("Step", fontsize=13)
     ax.set_ylabel("Cosine Similarity", fontsize=13)
     ax.set_title(
-        f"Cosine Similarity vs Step (alpha={args.alpha}, N1={args.N1}, "
-        f"N2={args.N2}, M={args.M}, "
-        f"{args.num_replicas} replicas)",
+        f"Cosine Similarity vs Step (alpha={args.alpha}, sigma={args.init_sigma}, "
+        f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
     ax.grid(True, alpha=0.3)
@@ -342,7 +347,8 @@ def main() -> None:
     print("Evaluation Metric: Cosine Similarity in Y-space")
     print("=" * 60)
     print(f"Device: {device}")
-    print(f"alpha={args.alpha}, N1={args.N1}, N2={args.N2}, M={args.M}")
+    print(f"alpha={args.alpha}, sigma={args.init_sigma}")
+    print(f"N1={args.N1}, N2={args.N2}, M={args.M}")
     if args.damping_schedule == "beta":
         print(
             f"max_steps={args.max_steps}, damping schedule: beta=max(1-step*{args.beta_scale}, {args.beta_max})"
@@ -351,9 +357,11 @@ def main() -> None:
         print(f"max_steps={args.max_steps}, damping={args.damping}")
     print("Teacher / graph / noise seed: 1")
     print("Student seed rule: 100 + replica_index")
+    print("Student init: teacher + sigma * noise, noise ~ N(0, 1)")
+    print("Student init target: both W and X, then normalize to unit variance")
     print("Shared across run: teacher / noisy field")
     print("Shared per alpha: graph")
-    print("Replica-specific: student initialization only")
+    print("Replica-specific: informative student noise only")
     if args.seed != 1:
         print(f"Legacy CLI seed argument {args.seed} is ignored by this fixed seed policy.")
     print(f"replicas={args.num_replicas}")
@@ -361,8 +369,8 @@ def main() -> None:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir_name = (
-        f"{timestamp}_loss_vs_step_Dence_F_1_onsager_cosine_alpha{args.alpha}_"
-        f"{args.N1}x{args.N2}_M{args.M}"
+        f"{timestamp}_loss_vs_step_Dence_F_1_onsager_cosine_informative_sigma{args.init_sigma}_"
+        f"alpha{args.alpha}_{args.N1}x{args.N2}_M{args.M}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
     plots_dir = results_dir / "plots"
@@ -399,11 +407,6 @@ def main() -> None:
         noise_var=args.noise_var,
         global_data=global_data,
     )
-    num_observations = int(shared_data["E"])
-
-    print(f"Observed entries: {num_observations}")
-    print("Loss definition: mean squared error on observed entries")
-    print()
 
     for replica_idx in range(args.num_replicas):
         seed = student_seed_base + replica_idx
@@ -423,6 +426,7 @@ def main() -> None:
             damping_beta_max=args.beta_max,
             noise_var=args.noise_var,
             convergence_threshold=args.convergence_threshold,
+            informative_init_sigma=args.init_sigma,
             return_history=True,
             loss_eval_interval=1,
             early_stop=False,

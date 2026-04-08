@@ -41,11 +41,11 @@ DAMPING = 0.7       # Lower bound for step damping, or fixed damping if disabled
 USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
 DAMPING_BETA_MAX = DAMPING
-NOISE_VAR = 0
+NOISE_VAR = 1e-5
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
-NUM_REPLICAS = 1
-CONVERGENCE_THRESHOLD = 1e-6
+NUM_REPLICAS = 5
+CONVERGENCE_THRESHOLD = 1e-5
 
 # ============================================================================
 # Main
