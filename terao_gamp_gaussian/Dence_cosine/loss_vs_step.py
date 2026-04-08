@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--damping-schedule",
         type=str,
         choices=["beta", "constant"],
-        default="constant",
+        default="beta",
     )
     parser.add_argument("--beta-scale", type=float, default=1e-3)
     parser.add_argument("--beta-max", type=float, default=0.5)
