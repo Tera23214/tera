@@ -38,10 +38,10 @@ from terao_gamp_gaussian.Dence_scaler_var_cosine.core import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot loss vs step for fixed alpha.")
     parser.add_argument("--alpha", type=float, default=5.0)
-    parser.add_argument("--N1", type=int, default=5000)
-    parser.add_argument("--N2", type=int, default=5000)
-    parser.add_argument("--M", type=int, default=300)
-    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--N1", type=int, default=2000)
+    parser.add_argument("--N2", type=int, default=2000)
+    parser.add_argument("--M", type=int, default=200)
+    parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--damping", type=float, default=0)
     parser.add_argument(
         "--damping-schedule",
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise-var", type=float, default=1e-6)
     parser.add_argument("--lam", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--num-replicas", type=int, default=2)
+    parser.add_argument("--num-replicas", type=int, default=1)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
 
@@ -109,7 +109,7 @@ def save_config(
         "convergence_threshold": args.convergence_threshold,
         "loss_eval_interval": 1,
         "early_stop": False,
-        "loss_definition": "sum_squared_error_on_observed_entries",
+        "loss_definition": "mean_squared_error_on_observed_entries",
         "evaluation_metric": "cosine_similarity_in_Y_space",
         "num_observed_entries": int(shared_data["E"]),
         "C1": int(shared_data["C1"]),
@@ -231,9 +231,9 @@ def plot_linear_loss(
     )
 
     ax.set_xlabel("Step", fontsize=13)
-    ax.set_ylabel("Observed squared-error sum", fontsize=13)
+    ax.set_ylabel("Observed MSE", fontsize=13)
     ax.set_title(
-        f"Observed squared-error sum vs Step (alpha={args.alpha}, N1={args.N1}, "
+        f"Observed MSE vs Step (alpha={args.alpha}, N1={args.N1}, "
         f"N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
@@ -276,9 +276,9 @@ def plot_log_loss(
     )
 
     ax.set_xlabel("Step", fontsize=13)
-    ax.set_ylabel("log10(Observed squared-error sum)", fontsize=13)
+    ax.set_ylabel("log10(Observed MSE)", fontsize=13)
     ax.set_title(
-        f"log10(Observed squared-error sum) vs Step (alpha={args.alpha}, "
+        f"log10(Observed MSE) vs Step (alpha={args.alpha}, "
         f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
@@ -391,7 +391,7 @@ def main() -> None:
     num_observations = int(shared_data["E"])
 
     print(f"Observed entries: {num_observations}")
-    print("Loss definition: sum of squared errors on observed entries")
+    print("Loss definition: mean squared error on observed entries")
     print()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -441,7 +441,7 @@ def main() -> None:
         )
 
         runtime = time.time() - replica_start
-        loss_history = np.asarray(history["loss"], dtype=np.float64) * num_observations
+        loss_history = np.asarray(history["loss"], dtype=np.float64)
         cosine_similarity_history = np.asarray(
             history["cosine_similarity"],
             dtype=np.float64,
@@ -455,7 +455,7 @@ def main() -> None:
         all_losses.append(loss_history)
         all_cosine_similarities.append(cosine_similarity_history)
         cosine_similarity_values.append(cosine_similarity)
-        final_losses.append(final_loss * num_observations)
+        final_losses.append(final_loss)
         runtimes.append(runtime)
         seeds.append(seed)
         convergence_steps.append(convergence_step)
@@ -465,7 +465,7 @@ def main() -> None:
         )
         print(
             f"Replica {replica_idx + 1}/{args.num_replicas}: "
-            f"seed={seed}, final_loss={final_loss * num_observations:.2e}, "
+                f"seed={seed}, final_loss={final_loss:.2e}, "
             f"final_cosine_similarity={cosine_similarity:.4f}, "
             f"estimated_convergence_step={convergence_text}, "
             f"steps_recorded={steps_taken}, runtime={runtime:.1f}s"

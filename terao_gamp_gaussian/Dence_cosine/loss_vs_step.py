@@ -39,20 +39,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot loss vs step for fixed alpha (dense mask)."
     )
-    parser.add_argument("--alpha", type=float, default=2.0)
+    parser.add_argument("--alpha", type=float, default=3.0)
     parser.add_argument("--N1", type=int, default=2000)
     parser.add_argument("--N2", type=int, default=2000)
     parser.add_argument("--M", type=int, default=200)
-    parser.add_argument("--max-steps", type=int, default=3000)
+    parser.add_argument("--max-steps", type=int, default=1500)
     parser.add_argument("--damping", type=float, default=0.5)
     parser.add_argument(
         "--damping-schedule",
         type=str,
         choices=["beta", "constant"],
-        default="beta",
+        default="constant",
     )
     parser.add_argument("--beta-scale", type=float, default=1e-3)
-    parser.add_argument("--beta-max", type=float, default=0.7)
+    parser.add_argument("--beta-max", type=float, default=0.5)
     parser.add_argument("--noise-var", type=float, default=0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=1)
