@@ -44,7 +44,7 @@ DAMPING_BETA_MAX = DAMPING
 NOISE_VAR = 1e-5
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
-NUM_REPLICAS = 5
+NUM_REPLICAS = 10
 CONVERGENCE_THRESHOLD = 1e-5
 
 # ============================================================================
