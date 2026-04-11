@@ -35,13 +35,13 @@ N1 = 2000
 N2 = 2000
 M = 200
 
-ALPHA_START =0.01
-ALPHA_STOP = 1
-ALPHA_STEP = 0.04
+ALPHA_START =0.1
+ALPHA_STOP = 5
+ALPHA_STEP = 0.2
 
-MAX_STEPS = 3000
+MAX_STEPS = 6000
 LR_BASE = 0.1
-BATCH_SIZE = 4000
+BATCH_SIZE = 3000
 LR = LR_BASE / math.sqrt(BATCH_SIZE)
 NOISE_VAR = 0
 SHARED_SEED = 1
@@ -75,9 +75,13 @@ def compute_predictions(
 
 def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
     """
-    Compute the observed-entry loss used by the existing AGD implementation.
+    Compute the average loss per observed edge.
+
+    The legacy implementation used ``M * sum((Y - Y_pred)^2)``. We now divide
+    by the number of observed edges so the reported value is a per-edge loss.
     """
-    return M * ((Y - Y_pred) ** 2).sum()
+    num_observed = max(Y.numel(), 1)
+    return M * ((Y - Y_pred) ** 2).sum() / num_observed
 
 
 def sample_minibatch_positions(

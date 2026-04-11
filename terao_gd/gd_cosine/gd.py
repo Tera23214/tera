@@ -3,15 +3,13 @@
 Alternating Gradient Descent (AGD) for sparse matrix factorization with
 cosine-similarity evaluation.
 
-This script implements alternating gradient descent for W, X optimization.
-Student estimates teacher's matrices through partially observed entries.
+This variant aligns the experimental setup with ``gd_cosine_minibatch``:
+- teacher / noise are shared across the whole run
+- graph is shared per alpha
+- replica-to-replica variation comes only from student initialization
 
-Loss function: L = sum((Y - Y_pred)^2)
-where Y[i,j] = W_teacher[i,:] @ X_teacher[:,j] (observed entries only)
-      Y_pred[i,j] = W_hat[i,:] @ X_hat[:,j]
-
-Optimization: Alternating updates of W and X using gradient descent.
-Supports multiple replicas for statistical averaging (GPU accelerated).
+Optimization remains full-batch alternating gradient descent, and the reported
+loss is the per-edge value ``M * sum((Y - Y_pred)^2) / C``.
 """
 
 #%%
@@ -47,9 +45,11 @@ ALPHA_STEP = 0.2
 MAX_STEPS = 3000
 LR_BASE = 0.3   # Base learning rate (calibrated for N=1000)
 LR = LR_BASE / math.sqrt(N1 * N2 * M)  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
-SEED = 42
+NOISE_VAR = 0.0
+SHARED_SEED = 1
+STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 10   # Number of replicas per alpha
-CONVERGENCE_THRESHOLD = 1e-6  # Early stopping threshold for loss
+CONVERGENCE_THRESHOLD = 1e-6  # Early stopping threshold for loss_per_edge
 
 # ============================================================================
 # AGD Helper Functions
@@ -196,67 +196,175 @@ def compute_y_cosine_similarity(
     return (inner / denom).item()
 
 
-def train_single_replica(
-    alpha: float,
+def prepare_global_shared_data(
     device: torch.device,
-    seed: int,
-):
+    seed: int = 1,
+    N1: int = N1,
+    N2: int = N2,
+    M: int = M,
+    noise_var: float = NOISE_VAR,
+) -> dict[str, torch.Tensor | float | int]:
     """
-    Train a single replica for a given alpha using GPU.
-    
-    Returns:
-        tuple: (cosine_similarity, reported_loss_per_edge, steps_taken)
+    Prepare teacher matrices and a full-grid noise field once for the whole run.
     """
-    # Generate teacher for this replica
     torch.manual_seed(seed)
     W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
     X_teacher = torch.randn(M, N2, device=device, dtype=torch.float32)
-    
-    # Generate graph (observed entries)
+
+    torch.manual_seed(seed)
+    noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "noise_full": noise_full,
+    }
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int = 1,
+    N1: int = N1,
+    N2: int = N2,
+    M: int = M,
+    noise_var: float = NOISE_VAR,
+    global_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> dict[str, torch.Tensor | float | int]:
+    """
+    Prepare graph and observed values once for a single alpha.
+
+    Teacher and noise are shared across the whole simulation. The returned
+    alpha-specific tensors are shared across replicas, so replica-to-replica
+    variation comes only from student initialization.
+    """
+    if global_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=seed,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+        )
+
     graph = RandomGraph()
-    i_idx, j_idx, C = graph.generate(N1, N2, M, alpha, device, seed)
-    
-    if C == 0:
+    i_idx, j_idx, num_observed = graph.generate(N1, N2, M, alpha, device, seed)
+    W_teacher = global_data["W_teacher"]
+    X_teacher = global_data["X_teacher"]
+    noise_full = global_data["noise_full"]
+
+    if num_observed == 0:
+        return {
+            "alpha": alpha,
+            "num_observed": 0,
+            "i_idx": i_idx,
+            "j_idx": j_idx,
+            "W_teacher": W_teacher,
+            "X_teacher": X_teacher,
+            "Y_clean": torch.empty(0, dtype=torch.float32, device=device),
+            "Y_train": torch.empty(0, dtype=torch.float32, device=device),
+        }
+
+    Y_clean = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
+    Y_train = Y_clean + noise_full[i_idx.long(), j_idx.long()]
+
+    return {
+        "alpha": alpha,
+        "num_observed": num_observed,
+        "i_idx": i_idx,
+        "j_idx": j_idx,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "Y_clean": Y_clean,
+        "Y_train": Y_train,
+    }
+
+
+def train_single_replica(
+    alpha: float | None = None,
+    device: torch.device | None = None,
+    seed: int = 42,
+    N1: int = N1,
+    N2: int = N2,
+    M: int = M,
+    max_steps: int = MAX_STEPS,
+    lr: float = LR,
+    noise_var: float = NOISE_VAR,
+    convergence_threshold: float = CONVERGENCE_THRESHOLD,
+    shared_data: dict[str, torch.Tensor | float | int] | None = None,
+):
+    """
+    Train a single replica using full-batch alternating gradient descent.
+
+    If ``shared_data`` is provided, graph / teacher / noisy observations are
+    reused. Otherwise teacher/noise are generated once and graph is generated
+    for the requested alpha. The ``seed`` argument controls only the student
+    initialization.
+    """
+    if shared_data is None:
+        if alpha is None:
+            raise ValueError("alpha must be provided when shared_data is None.")
+        if device is None:
+            raise ValueError("device must be provided when shared_data is None.")
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=1,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+        )
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=1,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=noise_var,
+            global_data=global_data,
+        )
+
+    num_observed = int(shared_data["num_observed"])
+    if num_observed == 0:
         return 0.0, 0.0, 0
-    
-    # Generate Y (observations)
-    Y = compute_predictions(W_teacher, X_teacher, i_idx, j_idx, M)
-    
-    # Initialize student randomly
+
+    i_idx = shared_data["i_idx"]
+    j_idx = shared_data["j_idx"]
+    Y_train = shared_data["Y_train"]
+    W_teacher = shared_data["W_teacher"]
+    X_teacher = shared_data["X_teacher"]
+    N1, M = W_teacher.shape
+    N2 = X_teacher.shape[1]
+
     torch.manual_seed(seed + 2000)
     W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
     X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
-    
-    # Alternating Gradient Descent loop with early stopping
+
     final_loss = 0.0
-    steps_taken = MAX_STEPS
-    
-    for step in range(MAX_STEPS):
-        # Update W (fix X)
-        W_hat = agd_step_W(W_hat, X_hat, Y, i_idx, j_idx, LR)
-        
-        # Update X (fix W)
-        X_hat = agd_step_X(W_hat, X_hat, Y, i_idx, j_idx, LR)
-        
-        # Apply constraint: normalize so that mean square = 1
+    steps_taken = max_steps
+
+    for step in range(max_steps):
+        W_hat = agd_step_W(W_hat, X_hat, Y_train, i_idx, j_idx, lr)
+        X_hat = agd_step_X(W_hat, X_hat, Y_train, i_idx, j_idx, lr)
         W_hat = normalize_to_unit_variance(W_hat)
         X_hat = normalize_to_unit_variance(X_hat)
-        
-        # Check for convergence every 100 steps
-        if step % 100 == 0 or step == MAX_STEPS - 1:
+
+        if step % 100 == 0 or step == max_steps - 1:
             Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
-            raw_loss = compute_loss(Y, Y_pred, M).item()
-            final_loss = compute_loss_per_edge(Y, Y_pred, M).item()
-            
-            if raw_loss < CONVERGENCE_THRESHOLD:
+            final_loss = compute_loss_per_edge(Y_train, Y_pred, M).item()
+
+            if final_loss < convergence_threshold:
                 steps_taken = step + 1
                 break
-    
-    # Compute cosine similarity in Y-space
+
     cosine_similarity = compute_y_cosine_similarity(
         W_hat, X_hat, W_teacher, X_teacher
     )
-    
+
     return cosine_similarity, final_loss, steps_taken
 
 
@@ -285,6 +393,11 @@ if __name__ == "__main__":
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
     print(f"Steps: {MAX_STEPS}, LR={LR}")
     print(f"Replicas per alpha: {NUM_REPLICAS}")
+    print(f"Teacher / graph / noise seed: {SHARED_SEED}")
+    print(f"Student seed rule: {STUDENT_SEED_BASE} + replica_id")
+    print("Shared across run: teacher / noisy field")
+    print("Shared per alpha: graph")
+    print("Replica-specific: student initialization only")
     print()
     
     # Create results directory with timestamp
@@ -308,11 +421,19 @@ if __name__ == "__main__":
         'max_steps': MAX_STEPS,
         'lr': LR,
         'lr_base': LR_BASE,
-        'seed': SEED,
+        'noise_var': NOISE_VAR,
+        'teacher_seed': SHARED_SEED,
+        'graph_seed': SHARED_SEED,
+        'noise_seed': SHARED_SEED,
+        'student_seed_base': STUDENT_SEED_BASE,
         'num_replicas': NUM_REPLICAS,
         'convergence_threshold': CONVERGENCE_THRESHOLD,
         'device': str(device),
         'evaluation_metric': 'cosine_similarity_in_Y_space',
+        'shared_teacher_noise_global': True,
+        'shared_graph_per_alpha': True,
+        'replica_variation': 'student_initialization_only',
+        'early_stop_metric': 'loss_per_edge',
     }
     config_path = results_dir / "config.yaml"
     with open(config_path, 'w') as f:
@@ -326,16 +447,44 @@ if __name__ == "__main__":
     start_time = time.time()
     total_tasks = len(alphas) * NUM_REPLICAS
     completed = 0
-    
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=SHARED_SEED,
+        N1=N1,
+        N2=N2,
+        M=M,
+        noise_var=NOISE_VAR,
+    )
+
     for alpha in alphas:
         cosine_similarity_values = []
         loss_values = []
         steps_values = []
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=SHARED_SEED,
+            N1=N1,
+            N2=N2,
+            M=M,
+            noise_var=NOISE_VAR,
+            global_data=global_data,
+        )
         for replica_id in range(NUM_REPLICAS):
-            seed = SEED + replica_id * 1000
+            seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
             cosine_similarity, final_loss, steps_taken = train_single_replica(
-                alpha, device, seed
+                alpha=alpha,
+                device=device,
+                seed=seed,
+                N1=N1,
+                N2=N2,
+                M=M,
+                max_steps=MAX_STEPS,
+                lr=LR,
+                noise_var=NOISE_VAR,
+                convergence_threshold=CONVERGENCE_THRESHOLD,
+                shared_data=shared_data,
             )
             dt = time.time() - t0
             cosine_similarity_values.append(cosine_similarity)
