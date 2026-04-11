@@ -1,0 +1,16 @@
+M: 10
+N1: 200
+N2: 200
+algorithm: agd_cosine_loss_vs_step
+alpha: 0.1
+convergence_threshold: 1.0e-06
+device: mps
+evaluation_metric: cosine_similarity_in_Y_space
+lr: 0.025
+lr_base: 0.01
+max_steps: 500
+noise_var: 0
+num_replicas: 3
+record_interval: 1
+seed: 42
+student_init: standard_normal

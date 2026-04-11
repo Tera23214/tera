@@ -36,19 +36,19 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 1000   # Number of rows
-N2 = 1000   # Number of columns  
-M = 200      # Rank (hidden dimension)
+N1 = 100   # Number of rows
+N2 = 100   # Number of columns  
+M = 10     # Rank (hidden dimension)
 
-ALPHA_START =0.1
-ALPHA_STOP = 3.0
+ALPHA_START = 0
+ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
 MAX_STEPS = 3000
-LR_BASE = 0.1     # Base learning rate (calibrated for N=1000)
-LR = LR_BASE * (1e6 / (N1 * N2 *M))  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
+LR_BASE = 0.3   # Base learning rate (calibrated for N=1000)
+LR = LR_BASE / math.sqrt(N1 * N2 * M)  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
 SEED = 42
-NUM_REPLICAS = 20   # Number of replicas per alpha
+NUM_REPLICAS = 10   # Number of replicas per alpha
 CONVERGENCE_THRESHOLD = 1e-6  # Early stopping threshold for loss
 
 # ============================================================================
@@ -78,11 +78,22 @@ def compute_predictions(
 
 def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
     """
-    Compute MSE loss: L = M * sum((Y - Y_pred)^2)
+    Compute the optimization loss: L = M * sum((Y - Y_pred)^2)
     
     The M factor compensates for 1/√M scaling in Y, keeping gradient scale unchanged.
     """
     return M * ((Y - Y_pred) ** 2).sum()
+
+
+def compute_loss_per_edge(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
+    """
+    Compute reported loss normalized by the number of observed edges.
+
+    This keeps the optimization loss unchanged while reporting a per-edge value:
+    L_report = (M * sum((Y - Y_pred)^2)) / C
+    """
+    num_edges = max(Y.numel(), 1)
+    return compute_loss(Y, Y_pred, M) / num_edges
 
 
 @torch.compile(mode="reduce-overhead")
@@ -194,7 +205,7 @@ def train_single_replica(
     Train a single replica for a given alpha using GPU.
     
     Returns:
-        tuple: (cosine_similarity, final_loss, steps_taken)
+        tuple: (cosine_similarity, reported_loss_per_edge, steps_taken)
     """
     # Generate teacher for this replica
     torch.manual_seed(seed)
@@ -234,10 +245,10 @@ def train_single_replica(
         # Check for convergence every 100 steps
         if step % 100 == 0 or step == MAX_STEPS - 1:
             Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
-            loss = compute_loss(Y, Y_pred, M).item()
-            final_loss = loss
+            raw_loss = compute_loss(Y, Y_pred, M).item()
+            final_loss = compute_loss_per_edge(Y, Y_pred, M).item()
             
-            if loss < CONVERGENCE_THRESHOLD:
+            if raw_loss < CONVERGENCE_THRESHOLD:
                 steps_taken = step + 1
                 break
     
@@ -333,7 +344,7 @@ if __name__ == "__main__":
             completed += 1
             print(
                 f"α={alpha:.2f}, replica {replica_id+1}/{NUM_REPLICAS}: "
-                f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
+                f"CosSim={cosine_similarity:.4f}, Loss/edge={final_loss:.2e}, "
                 f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
             )
         
@@ -353,7 +364,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Results (mean ± std)")
     print("=" * 60)
-    print(f"{'Alpha':>6} | {'CosSim':^20} | {'Loss':^20} | {'Steps':>8}")
+    print(f"{'Alpha':>6} | {'CosSim':^20} | {'Loss/edge':^20} | {'Steps':>8}")
     print("-" * 60)
     for alpha in sorted(results.keys()):
         r = results[alpha]
@@ -414,10 +425,10 @@ if __name__ == "__main__":
         # Header
         header = (
             "alpha,cosine_similarity_mean,cosine_similarity_std,"
-            "Loss_mean,Loss_std,Steps_mean"
+            "loss_per_edge_mean,loss_per_edge_std,Steps_mean"
         )
         for i in range(NUM_REPLICAS):
-            header += f",cosine_similarity_replica_{i},loss_replica_{i}"
+            header += f",cosine_similarity_replica_{i},loss_per_edge_replica_{i}"
         f.write(header + "\n")
         
         # Data

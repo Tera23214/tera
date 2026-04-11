@@ -1,0 +1,15 @@
+M: 200
+N1: 2000
+N2: 2000
+algorithm: agd_cosine
+alpha_start: 0.01
+alpha_step: 0.01
+alpha_stop: 0.5
+convergence_threshold: 1.0e-06
+device: mps
+evaluation_metric: cosine_similarity_in_Y_space
+lr: 0.000125
+lr_base: 0.1
+max_steps: 3000
+num_replicas: 10
+seed: 42

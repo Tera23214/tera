@@ -107,10 +107,10 @@ def compute_y_cosine_similarity(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot AGD loss vs step for fixed alpha.")
-    parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--N1", type=int, default=1000)
-    parser.add_argument("--N2", type=int, default=1000)
-    parser.add_argument("--M", type=int, default=200)
+    parser.add_argument("--alpha", type=float, default=0.1)
+    parser.add_argument("--N1", type=int, default=200)
+    parser.add_argument("--N2", type=int, default=200)
+    parser.add_argument("--M", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=500)
     parser.add_argument(
         "--lr",
@@ -118,8 +118,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Learning rate. Defaults to gd.py-style auto scaling.",
     )
-    parser.add_argument("--lr-base", type=float, default=0.1)
-    parser.add_argument("--noise-var", type=float, default=1e-3)
+    parser.add_argument("--lr-base", type=float, default=0.01)
+    parser.add_argument("--noise-var", type=float, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-replicas", type=int, default=3)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
