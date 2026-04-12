@@ -22,7 +22,7 @@ import torch
 import yaml
 
 # Add parent directories to path
-repo_root = Path(__file__).resolve().parent.parent.parent
+repo_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.Dence_Alternating.core import (
@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--N1", type=int, default=2000)
     parser.add_argument("--N2", type=int, default=2000)
     parser.add_argument("--M", type=int, default=200)
-    parser.add_argument("--max-steps", type=int, default=10000)
+    parser.add_argument("--max-steps", type=int, default=5000)
     parser.add_argument("--damping", type=float, default=0)
     parser.add_argument(
         "--damping-schedule",
@@ -376,7 +376,7 @@ def main() -> None:
         f"{timestamp}_loss_vs_step_Dence_Alternating_alpha{args.alpha}_"
         f"{args.N1}x{args.N2}_M{args.M}"
     )
-    results_dir = Path(__file__).parent / "results" / results_dir_name
+    results_dir = Path(__file__).resolve().parent.parent / "results" / results_dir_name
     plots_dir = results_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 

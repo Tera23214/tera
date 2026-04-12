@@ -1,0 +1,3 @@
+label,result_dir,alpha,N1,N2,M,noise_var,num_replicas,max_recorded_step,final_loss_mean,final_cosine_similarity_mean,mean_runtime_sec
+"loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200 (alpha=3.0, noise=1e-05) [20260411_190203]",/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/results/20260411_190203_loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200,3.0,2000,2000,200,1e-05,1,10000,7.5910705328e-01,6.9626703858e-02,540.8447
+"loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200 (alpha=3.0, noise=1e-05) [20260412_163619]",/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/results/20260412_163619_loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200,3.0,2000,2000,200,1e-05,1,5000,8.0692273378e-01,5.9145554900e-02,184.2659

@@ -1,0 +1,21 @@
+algorithm_family: Dence_Alternating_loss_vs_step_comparison
+num_inputs: 2
+inputs:
+- label: loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200 (alpha=3.0, noise=1e-05)
+    [20260411_190203]
+  result_dir: /Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/results/20260411_190203_loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200
+  alpha: 3.0
+  N1: 2000
+  N2: 2000
+  M: 200
+  noise_var: 1.0e-05
+  num_replicas: 1
+- label: loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200 (alpha=3.0, noise=1e-05)
+    [20260412_163619]
+  result_dir: /Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/results/20260412_163619_loss_vs_step_Dence_Alternating_alpha3.0_2000x2000_M200
+  alpha: 3.0
+  N1: 2000
+  N2: 2000
+  M: 200
+  noise_var: 1.0e-05
+  num_replicas: 1
