@@ -45,10 +45,10 @@ def parse_args() -> argparse.Namespace:
         description="Plot mini-batch SGD loss vs step for fixed alpha."
     )
     parser.add_argument("--alpha", type=float, default=3.0)
-    parser.add_argument("--N1", type=int, default=100)
-    parser.add_argument("--N2", type=int, default=100)
-    parser.add_argument("--M", type=int, default=20)
-    parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--N1", type=int, default=1000)
+    parser.add_argument("--N2", type=int, default=1000)
+    parser.add_argument("--M", type=int, default=100)
+    parser.add_argument("--max-steps", type=int, default=6000)
     parser.add_argument(
         "--lr",
         type=float,
@@ -61,11 +61,11 @@ def parse_args() -> argparse.Namespace:
         default=1e-1,
         help="Base coefficient for auto LR scaling: lr = lr_base / sqrt(batch_size).",
     )
-    parser.add_argument("--batch-size", type=int, default=1000)
-    parser.add_argument("--noise-var", type=float, default=1e-3)
+    parser.add_argument("--batch-size", type=int, default=4000)
+    parser.add_argument("--noise-var", type=float, default=0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=3)
-    parser.add_argument("--convergence-threshold", type=float, default=1e-6)
+    parser.add_argument("--convergence-threshold", type=float, default=1e-5)
     parser.add_argument("--record-interval", type=int, default=5)
     return parser.parse_args()
 

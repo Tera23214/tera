@@ -31,16 +31,16 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 2000
-N2 = 2000
-M = 200
+N1 = 1000
+N2 = 1000
+M = 100
 
-ALPHA_START =0.1
+ALPHA_START =0
 ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
 MAX_STEPS = 6000
-LR_BASE = 0.1
+LR_BASE = 0.01
 BATCH_SIZE = 4000
 LR = LR_BASE / math.sqrt(BATCH_SIZE)
 NOISE_VAR = 0
@@ -48,7 +48,7 @@ SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 10
 CONVERGENCE_THRESHOLD = 1e-5
-LOSS_EVAL_INTERVAL = 500
+LOSS_EVAL_INTERVAL = 50
 
 
 # ============================================================================
@@ -336,6 +336,7 @@ def train_single_replica(
 
     final_loss = 0.0
     steps_taken = max_steps
+    prev_loss = float("inf")
 
     for step in range(max_steps):
         batch_positions = sample_minibatch_positions(
@@ -371,9 +372,10 @@ def train_single_replica(
             loss = float(compute_loss(Y_train, Y_pred_full, M).item())
             final_loss = loss
 
-            if loss < convergence_threshold:
+            if abs(prev_loss - loss) < convergence_threshold:
                 steps_taken = step + 1
                 break
+            prev_loss = loss
 
     cosine_similarity = compute_y_cosine_similarity(
         W_hat, X_hat, W_teacher, X_teacher
@@ -452,6 +454,11 @@ if __name__ == "__main__":
     print(f"Matrix: {N1}×{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
     print(f"Steps: {MAX_STEPS}, LR={LR}, Batch={BATCH_SIZE}")
+    print(
+        "Early stopping: "
+        f"abs(loss_t - loss_(t-1)) < {CONVERGENCE_THRESHOLD} "
+        f"(checked every {LOSS_EVAL_INTERVAL} step)"
+    )
     print("Sampling: with replacement from observed edges")
     print("Teacher / graph / noise seed: 1")
     print("Student seed rule: 100 + replica_id")
@@ -488,6 +495,8 @@ if __name__ == "__main__":
         "student_seed_base": STUDENT_SEED_BASE,
         "num_replicas": NUM_REPLICAS,
         "convergence_threshold": CONVERGENCE_THRESHOLD,
+        "loss_eval_interval": LOSS_EVAL_INTERVAL,
+        "early_stop_metric": "abs_delta_loss_per_edge",
         "device": str(device),
         "evaluation_metric": "cosine_similarity_in_Y_space",
         "sampling": "with_replacement",
