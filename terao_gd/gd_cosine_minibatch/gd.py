@@ -40,9 +40,13 @@ ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
 MAX_STEPS = 6000
-LR_BASE = 0.01
 BATCH_SIZE = 4000
-LR = LR_BASE / math.sqrt(BATCH_SIZE)
+LR_SCHEDULE = [
+    (0.0, 0.5, 1e-2),
+    (0.5, 1.5, 3e-2),
+    (1.5, 3.0, 6e-2),
+    (3.0, float("inf"), 1e-1),
+]
 NOISE_VAR = 0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
@@ -100,6 +104,36 @@ def sample_minibatch_positions(
         size=(batch_size,),
         device=device,
     )
+
+
+def resolve_lr(
+    alpha: float,
+    lr_schedule: list[tuple[float, float, float]] = LR_SCHEDULE,
+) -> float:
+    """
+    Resolve the learning rate from the configured alpha ranges.
+    """
+    for alpha_min, alpha_max, lr_value in lr_schedule:
+        if alpha_min <= alpha < alpha_max:
+            return float(lr_value)
+    return float(lr_schedule[-1][2])
+
+
+def compute_effective_epochs(
+    num_observed: int,
+    batch_size: int,
+    max_steps: int,
+) -> float:
+    """
+    Convert a fixed update budget into expected epochs.
+
+    With replacement sampling, one epoch corresponds to sampling
+    ``num_observed`` entries on average, so
+    ``effective_epochs = max_steps * batch_size / num_observed``.
+    """
+    if num_observed <= 0 or batch_size <= 0:
+        return 0.0
+    return float(max_steps * batch_size / num_observed)
 
 
 def sgd_step_W(
@@ -288,7 +322,7 @@ def train_single_replica(
     N2: int = N2,
     M: int = M,
     max_steps: int = MAX_STEPS,
-    lr: float = LR,
+    lr: float | None = None,
     batch_size: int = BATCH_SIZE,
     noise_var: float = NOISE_VAR,
     convergence_threshold: float = CONVERGENCE_THRESHOLD,
@@ -321,6 +355,9 @@ def train_single_replica(
     num_observed = int(shared_data["num_observed"])
     if num_observed == 0:
         return 0.0, 0.0, 0
+
+    if lr is None:
+        lr = resolve_lr(alpha)
 
     i_idx = shared_data["i_idx"]
     j_idx = shared_data["j_idx"]
@@ -392,7 +429,8 @@ def save_metrics_csv(
     csv_path = results_dir / "metrics.csv"
     with open(csv_path, "w") as f:
         header = (
-            "alpha,cosine_similarity_mean,cosine_similarity_std,"
+            "alpha,lr,num_observed,effective_epochs,"
+            "cosine_similarity_mean,cosine_similarity_std,"
             "Loss_mean,Loss_std,Steps_mean"
         )
         for i in range(num_replicas):
@@ -402,7 +440,8 @@ def save_metrics_csv(
         for alpha in alphas_list:
             r = results[alpha]
             line = (
-                f"{alpha},{r['cosine_similarity_mean']},"
+                f"{alpha},{r['lr']},{r['num_observed']},{r['effective_epochs']},"
+                f"{r['cosine_similarity_mean']},"
                 f"{r['cosine_similarity_std']},{r['loss_mean']},"
                 f"{r['loss_std']},{r['steps_mean']}"
             )
@@ -420,11 +459,13 @@ def save_replica_summary(
     summary_path = results_dir / "replica_summary.csv"
     with open(summary_path, "w") as f:
         f.write(
-            "alpha,replica,seed,runtime_sec,final_loss,steps_taken,cosine_similarity\n"
+            "alpha,lr,num_observed,effective_epochs,replica,seed,runtime_sec,"
+            "final_loss,steps_taken,cosine_similarity\n"
         )
         for record in replica_records:
             f.write(
-                f"{record['alpha']},{record['replica']},{record['seed']},"
+                f"{record['alpha']},{record['lr']},{record['num_observed']},"
+                f"{record['effective_epochs']},{record['replica']},{record['seed']},"
                 f"{record['runtime_sec']:.4f},{record['final_loss']:.10e},"
                 f"{record['steps_taken']},{record['cosine_similarity']:.10e}\n"
             )
@@ -453,7 +494,9 @@ if __name__ == "__main__":
 
     print(f"Matrix: {N1}×{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
-    print(f"Steps: {MAX_STEPS}, LR={LR}, Batch={BATCH_SIZE}")
+    print(f"Steps: {MAX_STEPS}, Batch={BATCH_SIZE}")
+    print(f"LR schedule: {LR_SCHEDULE}")
+    print("Effective epoch formula: max_steps * batch_size / num_observed")
     print(
         "Early stopping: "
         f"abs(loss_t - loss_(t-1)) < {CONVERGENCE_THRESHOLD} "
@@ -484,10 +527,12 @@ if __name__ == "__main__":
         "alpha_stop": ALPHA_STOP,
         "alpha_step": ALPHA_STEP,
         "max_steps": MAX_STEPS,
-        "lr": LR,
-        "lr_base": LR_BASE,
         "batch_size": BATCH_SIZE,
-        "lr_auto_formula": "lr_base / sqrt(batch_size)",
+        "lr_schedule": [
+            {"alpha_min": alpha_min, "alpha_max": alpha_max, "lr": lr_value}
+            for alpha_min, alpha_max, lr_value in LR_SCHEDULE
+        ],
+        "effective_epoch_formula": "max_steps * batch_size / num_observed",
         "noise_var": NOISE_VAR,
         "teacher_seed": SHARED_SEED,
         "graph_seed": SHARED_SEED,
@@ -536,6 +581,17 @@ if __name__ == "__main__":
             noise_var=NOISE_VAR,
             global_data=global_data,
         )
+        num_observed = int(shared_data["num_observed"])
+        lr_alpha = resolve_lr(float(alpha))
+        effective_epochs = compute_effective_epochs(
+            num_observed=num_observed,
+            batch_size=BATCH_SIZE,
+            max_steps=MAX_STEPS,
+        )
+        print(
+            f"α={alpha:.2f}: E={num_observed}, lr={lr_alpha:.3e}, "
+            f"effective_epochs={effective_epochs:.2f}"
+        )
 
         cosine_similarity_values = []
         loss_values = []
@@ -552,7 +608,7 @@ if __name__ == "__main__":
                 N2=N2,
                 M=M,
                 max_steps=MAX_STEPS,
-                lr=LR,
+                lr=lr_alpha,
                 batch_size=BATCH_SIZE,
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
@@ -566,6 +622,9 @@ if __name__ == "__main__":
             replica_records.append(
                 {
                     "alpha": float(alpha),
+                    "lr": lr_alpha,
+                    "num_observed": num_observed,
+                    "effective_epochs": effective_epochs,
                     "replica": replica_id + 1,
                     "seed": replica_seed,
                     "runtime_sec": dt,
@@ -581,6 +640,9 @@ if __name__ == "__main__":
             )
 
         results[alpha] = {
+            "lr": lr_alpha,
+            "num_observed": num_observed,
+            "effective_epochs": effective_epochs,
             "cosine_similarity_mean": np.mean(cosine_similarity_values),
             "cosine_similarity_std": np.std(cosine_similarity_values),
             "cosine_similarity_values": cosine_similarity_values,

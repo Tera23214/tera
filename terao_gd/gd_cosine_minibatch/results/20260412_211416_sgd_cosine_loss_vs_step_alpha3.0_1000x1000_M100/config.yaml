@@ -1,0 +1,27 @@
+M: 100
+N1: 1000
+N2: 1000
+algorithm: sgd_cosine_minibatch_loss_vs_step
+alpha: 3.0
+batch_size: 4000
+convergence_threshold: 1.0e-05
+device: mps
+evaluation_metric: cosine_similarity_in_Y_space
+graph_seed: 1
+legacy_cli_seed: 1
+lr: 7.905694150420948e-05
+lr_auto_formula: lr_base / sqrt(batch_size)
+lr_base: 0.005
+max_steps: 6000
+noise_seed: 1
+noise_var: 0
+num_observed: 300000
+num_replicas: 3
+record_interval: 5
+replica_variation: student_initialization_only
+sampling: with_replacement
+shared_per_alpha_graph_noise: true
+shared_teacher_noise_global: true
+student_init: standard_normal
+student_seed_base: 100
+teacher_seed: 1

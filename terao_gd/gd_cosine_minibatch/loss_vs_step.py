@@ -58,13 +58,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr-base",
         type=float,
-        default=1e-1,
+        default=5e-3,
         help="Base coefficient for auto LR scaling: lr = lr_base / sqrt(batch_size).",
     )
-    parser.add_argument("--batch-size", type=int, default=4000)
+    parser.add_argument("--batch-size", type=int, default=2000)
     parser.add_argument("--noise-var", type=float, default=0)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--num-replicas", type=int, default=3)
+    parser.add_argument("--num-replicas", type=int, default=1)
     parser.add_argument("--convergence-threshold", type=float, default=1e-5)
     parser.add_argument("--record-interval", type=int, default=5)
     return parser.parse_args()
