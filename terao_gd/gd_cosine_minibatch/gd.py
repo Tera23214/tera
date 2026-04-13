@@ -42,10 +42,10 @@ ALPHA_STEP = 0.2
 MAX_STEPS = 6000
 BATCH_SIZE = 5000
 LR_SCHEDULE = [
-    (0.0, 0.5, 1e-2),
-    (0.5, 1.5, 3e-2),
-    (1.5, 3.0, 6e-2),
-    (3.0, float("inf"), 1e-1),
+    (0.0, 0.5, 1e-3),
+    (0.5, 1.5, 2e-3),
+    (1.5, 3.0, 3e-3),
+    (3.0, float("inf"), 3e-3),
 ]
 NOISE_VAR = 0
 SHARED_SEED = 1
