@@ -34,15 +34,15 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 100   # Number of rows
-N2 = 100   # Number of columns  
-M = 10     # Rank (hidden dimension)
+N1 = 1000   # Number of rows
+N2 = 1000   # Number of columns  
+M = 100     # Rank (hidden dimension)
 
 ALPHA_START = 0
 ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 3000
+MAX_STEPS = 8000
 LR_BASE = 0.3   # Base learning rate (calibrated for N=1000)
 LR = LR_BASE / math.sqrt(N1 * N2 * M)  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
 NOISE_VAR = 0.0

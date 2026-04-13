@@ -13,6 +13,11 @@ from typing import Tuple
 import torch
 import numpy as np
 
+from graph_core import (
+    generate_two_point_dense_mask,
+    generate_two_point_row_degree_graph,
+)
+
 
 class BiregularGraph:
     """
@@ -22,7 +27,7 @@ class BiregularGraph:
     Each X-node (column) has exactly C2 edges.
     Uses rejection sampling to avoid multi-edges.
     """
-    
+
     def generate(
         self,
         N1: int,
@@ -149,6 +154,113 @@ class BiregularGraph:
             mask[i_idx.long(), j_idx.long()] = 1.0
 
         return mask, i_idx, j_idx, E, C1, C2, alpha2
+
+    def generate_two_point_row_degree_graph(
+        self,
+        N1: int,
+        N2: int,
+        M: int,
+        alpha: float,
+        p: float,
+        r: float,
+        device: torch.device,
+        seed: int = None,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        torch.Tensor,
+        int,
+        int,
+        int,
+        int,
+        float,
+        float,
+    ]:
+        """
+        Generate a graph with a two-point mixture of row degrees.
+
+        Each row degree C_i is assigned as:
+            C_i = ca with probability p
+            C_i = cb with probability 1 - p
+
+        where r = ca / cb and alpha controls the average row degree through
+            alpha * M = p * ca + (1 - p) * cb
+
+        The realized mixture uses exactly round(p * N1) rows with degree ca.
+
+        Returns:
+            i_idx: Row indices of observed entries
+            j_idx: Column indices of observed entries
+            E: Total number of observed entries
+            row_degrees: Per-row observed counts
+            ca: Rounded degree level associated with mixture weight p
+            cb: Rounded degree level associated with mixture weight 1 - p
+            num_ca: Number of rows assigned degree ca
+            num_cb: Number of rows assigned degree cb
+            p_eff: Realized fraction num_ca / N1
+            alpha_eff: Realized mean row degree divided by M
+        """
+        return generate_two_point_row_degree_graph(
+            N1=N1,
+            N2=N2,
+            M=M,
+            alpha=alpha,
+            p=p,
+            r=r,
+            device=device,
+            seed=seed,
+        )
+
+    def generate_two_point_dense_mask(
+        self,
+        N1: int,
+        N2: int,
+        M: int,
+        alpha: float,
+        p: float,
+        r: float,
+        device: torch.device,
+        seed: int = None,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        torch.Tensor,
+        int,
+        int,
+        int,
+        int,
+        float,
+        float,
+    ]:
+        """
+        Generate a dense observation mask for the two-point row-degree model.
+
+        Returns:
+            mask: Dense binary observation mask with shape (N1, N2)
+            i_idx: Row indices of observed entries
+            j_idx: Column indices of observed entries
+            E: Total number of observed entries
+            row_degrees: Per-row observed counts
+            ca: Rounded degree level associated with mixture weight p
+            cb: Rounded degree level associated with mixture weight 1 - p
+            num_ca: Number of rows assigned degree ca
+            num_cb: Number of rows assigned degree cb
+            p_eff: Realized fraction num_ca / N1
+            alpha_eff: Realized mean row degree divided by M
+        """
+        return generate_two_point_dense_mask(
+            N1=N1,
+            N2=N2,
+            M=M,
+            alpha=alpha,
+            p=p,
+            r=r,
+            device=device,
+            seed=seed,
+        )
 
 
 # Backward compatibility wrapper
