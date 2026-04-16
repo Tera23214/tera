@@ -63,13 +63,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot loss vs step for fixed alpha (non-uniform N1 graph)."
     )
-    parser.add_argument("--alpha", type=float, default=3.0)
+    parser.add_argument("--alpha", type=float, default=2.5)
     parser.add_argument("--N1", type=int, default=2000)
     parser.add_argument("--N2", type=int, default=2000)
     parser.add_argument("--M", type=int, default=200)
-    parser.add_argument("--p", type=float, default=0.1)
-    parser.add_argument("--r", type=float, default=10)
-    parser.add_argument("--max-steps", type=int, default=10000)
+    parser.add_argument("--p", type=float, default=0.2)
+    parser.add_argument("--r", type=float, default=5)
+    parser.add_argument("--max-steps", type=int, default=5000)
     parser.add_argument("--damping", type=float, default=0)
     parser.add_argument(
         "--damping-schedule",
@@ -80,8 +80,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-scale", type=float, default=1e-2)
     parser.add_argument("--beta-max", type=float, default=0.4)
     parser.add_argument("--noise-var", type=float, default=1e-5)
+    parser.add_argument("--init-epsilon", type=float, default=4)
+    parser.add_argument("--graph-seed", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--num-replicas", type=int, default=1)
+    parser.add_argument("--num-replicas", type=int, default=3)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
     return parser.parse_args()
 
@@ -114,8 +116,14 @@ def save_config(
         "beta_scale": args.beta_scale,
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
+        "student_init_mode": (
+            "teacher_plus_noise_normalized"
+            if args.init_epsilon is not None
+            else "random_gaussian"
+        ),
+        "student_init_epsilon": args.init_epsilon,
         "teacher_seed": 1,
-        "graph_seed": 1,
+        "graph_seed": args.graph_seed,
         "noise_seed": 1,
         "student_seed_base": 100,
         "legacy_cli_seed": args.seed,
@@ -159,9 +167,16 @@ def main() -> None:
         )
     else:
         print(f"max_steps={args.max_steps}, damping={args.damping}")
+    if args.init_epsilon is None:
+        print("Student init: random Gaussian")
+    else:
+        print(
+            "Student init: teacher + epsilon * N(0, 1), "
+            f"epsilon={args.init_epsilon} (then mean-square normalization)"
+        )
     print("Step definition: one W update followed by one X update")
     print("Onsager memory: advanced every half-step")
-    print("Teacher / graph / noise seed: 1")
+    print(f"Teacher seed: 1, graph seed: {args.graph_seed}, noise seed: 1")
     print("Student seed rule: 100 + replica_index")
     print("Shared across run: teacher / noisy field")
     print("Shared per alpha: graph")
@@ -177,6 +192,8 @@ def main() -> None:
     results_dir_name = (
         f"{timestamp}_loss_vs_step_Dence_Alternating_non_uniform_n1_alpha{args.alpha}_"
         f"{args.N1}x{args.N2}_M{args.M}_p{args.p}_r{args.r}"
+        f"_gseed{args.graph_seed}"
+        f"_initeps{args.init_epsilon if args.init_epsilon is not None else 'random'}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
     plots_dir = results_dir / "plots"
@@ -204,7 +221,7 @@ def main() -> None:
     shared_data = prepare_shared_alpha_data(
         alpha=args.alpha,
         device=device,
-        seed=shared_seed,
+        seed=args.graph_seed,
         N1=args.N1,
         N2=args.N2,
         M=args.M,
@@ -252,6 +269,7 @@ def main() -> None:
             early_stop=False,
             p=args.p,
             r=args.r,
+            init_epsilon=args.init_epsilon,
             shared_data=shared_data,
         )
 

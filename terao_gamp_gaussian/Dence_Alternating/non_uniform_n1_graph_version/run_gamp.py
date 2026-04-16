@@ -40,8 +40,9 @@ ALPHA_START = 0.2
 ALPHA_STOP = 5.0
 ALPHA_STEP = 0.2
 
-P = 0.5
-R = 0.5
+P = 0.2
+R = 5
+INIT_EPSILON = None #uninformative => None, studet = teacher + epsilon*N(0,1)
 
 MAX_STEPS = 10000
 DAMPING = 0
@@ -79,6 +80,13 @@ if __name__ == "__main__":
     print(f"Matrix: {N1}x{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
     print(f"Two-point parameters: p={P}, r={R}")
+    if INIT_EPSILON is None:
+        print("Student init: random Gaussian")
+    else:
+        print(
+            "Student init: teacher + epsilon * N(0, 1), "
+            f"epsilon={INIT_EPSILON} (then mean-square normalization)"
+        )
     if USE_STEP_DAMPING:
         print(
             f"Steps: {MAX_STEPS}, Damping schedule: "
@@ -93,6 +101,7 @@ if __name__ == "__main__":
     results_dir_name = (
         f"{timestamp}_gamp_Dence_Alternating_non_uniform_n1_{N1}x{M}"
         f"_alpha{ALPHA_START}-{ALPHA_STOP}_p{P}_r{R}"
+        f"_initeps{INIT_EPSILON if INIT_EPSILON is not None else 'random'}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +118,12 @@ if __name__ == "__main__":
         "alpha_step": ALPHA_STEP,
         "p": P,
         "r": R,
+        "student_init_mode": (
+            "teacher_plus_noise_normalized"
+            if INIT_EPSILON is not None
+            else "random_gaussian"
+        ),
+        "student_init_epsilon": INIT_EPSILON,
         "max_steps": MAX_STEPS,
         "damping": DAMPING,
         "use_step_damping": USE_STEP_DAMPING,
@@ -179,6 +194,7 @@ if __name__ == "__main__":
                 convergence_threshold=CONVERGENCE_THRESHOLD,
                 p=P,
                 r=R,
+                init_epsilon=INIT_EPSILON,
                 shared_data=shared_data,
             )
 
@@ -200,7 +216,15 @@ if __name__ == "__main__":
             "cosine_similarity_values": cosine_similarity_values,
             "loss_mean": np.mean(loss_values),
             "loss_std": np.std(loss_values),
+            "loss_values": loss_values,
             "steps_mean": np.mean(steps_values),
+            "p_eff": float(shared_data["p_eff"]),
+            "alpha_eff": float(shared_data["alpha_eff"]),
+            "ca": int(shared_data["ca"]),
+            "cb": int(shared_data["cb"]),
+            "num_ca": int(shared_data["num_ca"]),
+            "num_cb": int(shared_data["num_cb"]),
+            "E": int(shared_data["E"]),
         }
 
     total_time = time.time() - start_time
@@ -238,3 +262,32 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(plots_dir / "cosine_similarity_vs_alpha.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+    csv_path = results_dir / "metrics.csv"
+    with open(csv_path, "w") as f:
+        header = (
+            "alpha,alpha_eff,p_eff,ca,cb,num_ca,num_cb,E,"
+            "cosine_similarity_mean,cosine_similarity_std,"
+            "Loss_mean,Loss_std,Steps_mean"
+        )
+        for i in range(NUM_REPLICAS):
+            header += f",cosine_similarity_replica_{i},loss_replica_{i}"
+        f.write(header + "\n")
+
+        for alpha in alphas_list:
+            result = results[alpha]
+            line = (
+                f"{alpha},{result['alpha_eff']},{result['p_eff']},"
+                f"{result['ca']},{result['cb']},{result['num_ca']},"
+                f"{result['num_cb']},{result['E']},"
+                f"{result['cosine_similarity_mean']},{result['cosine_similarity_std']},"
+                f"{result['loss_mean']},{result['loss_std']},{result['steps_mean']}"
+            )
+            for cosine_similarity_value, loss_value in zip(
+                result["cosine_similarity_values"],
+                result["loss_values"],
+            ):
+                line += f",{cosine_similarity_value},{loss_value}"
+            f.write(line + "\n")
+
+    print(f"Metrics saved: {csv_path}")

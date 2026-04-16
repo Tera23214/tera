@@ -44,15 +44,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot mini-batch SGD loss vs step for fixed alpha."
     )
-    parser.add_argument("--alpha", type=float, default=3)
+    parser.add_argument("--alpha", type=float, default=4)
     parser.add_argument("--N1", type=int, default=1000)
     parser.add_argument("--N2", type=int, default=1000)
     parser.add_argument("--M", type=int, default=100)
-    parser.add_argument("--max-steps", type=int, default=3000)
+    parser.add_argument("--max-steps", type=int, default=15000)
     parser.add_argument(
         "--lr",
         type=float,
-        default=3e-3,
+        default=1.5e-3,
         help="Learning rate. Defaults to lr_base / sqrt(batch_size).",
     )
     parser.add_argument(
@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Base coefficient for auto LR scaling: lr = lr_base / sqrt(batch_size).",
     )
-    parser.add_argument("--batch-size", type=int, default=4000)
+    parser.add_argument("--batch-size", type=int, default=2000)
     parser.add_argument("--noise-var", type=float, default=0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=1)

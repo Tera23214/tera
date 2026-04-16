@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -75,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional output directory. Defaults to loss_vs_step/comparisons/<timestamp>.",
+    )
+    parser.add_argument(
+        "--max-step",
+        type=int,
+        default=None,
+        help="Optional maximum step to include in the plots and summary.",
     )
     return parser.parse_args()
 
@@ -216,6 +222,38 @@ def load_run(result_dir: Path, label: str | None) -> RunData:
     )
 
 
+def truncate_run(run: RunData, max_step: int | None) -> RunData:
+    if max_step is None:
+        return run
+
+    mask = run.steps <= max_step
+    if not np.any(mask):
+        raise ValueError(
+            f"{run.result_dir} does not contain any step <= {max_step}."
+        )
+
+    steps = run.steps[mask]
+    loss_mean = run.loss_mean[mask]
+    loss_std = run.loss_std[mask]
+    log10_loss_mean = run.log10_loss_mean[mask]
+    log10_loss_std = run.log10_loss_std[mask]
+    cosine_mean = run.cosine_mean[mask]
+    cosine_std = run.cosine_std[mask]
+
+    return replace(
+        run,
+        steps=steps,
+        loss_mean=loss_mean,
+        loss_std=loss_std,
+        log10_loss_mean=log10_loss_mean,
+        log10_loss_std=log10_loss_std,
+        cosine_mean=cosine_mean,
+        cosine_std=cosine_std,
+        final_loss_mean=float(loss_mean[-1]),
+        final_cosine_mean=float(cosine_mean[-1]),
+    )
+
+
 def build_output_dir(output_dir: Path | None) -> Path:
     if output_dir is not None:
         resolved = output_dir.expanduser().resolve()
@@ -275,6 +313,7 @@ def save_manifest(output_dir: Path, runs: list[RunData]) -> None:
     manifest = {
         "algorithm_family": "Dence_Alternating_loss_vs_step_comparison",
         "num_inputs": len(runs),
+        "max_recorded_step": int(max(run.steps[-1] for run in runs)),
         "inputs": [
             {
                 "label": run.label,
@@ -301,6 +340,7 @@ def plot_metric(
     ylabel: str,
     title: str,
     band_floor: float | None = None,
+    max_step: int | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(10, 7))
 
@@ -331,6 +371,8 @@ def plot_metric(
     ax.set_xlabel("Step", fontsize=13)
     ax.set_ylabel(ylabel, fontsize=13)
     ax.set_title(title, fontsize=14)
+    if max_step is not None:
+        ax.set_xlim(1, max_step)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=10)
     plt.tight_layout()
@@ -342,10 +384,15 @@ def main() -> None:
     args = parse_args()
     if args.labels is not None and len(args.labels) != len(args.paths):
         raise ValueError("--labels must have the same length as the input paths.")
+    if args.max_step is not None and args.max_step <= 0:
+        raise ValueError("--max-step must be a positive integer.")
 
     result_dirs = [resolve_result_dir(path_str) for path_str in args.paths]
     labels = args.labels or [None] * len(result_dirs)
-    runs = [load_run(result_dir, label) for result_dir, label in zip(result_dirs, labels)]
+    runs = [
+        truncate_run(load_run(result_dir, label), args.max_step)
+        for result_dir, label in zip(result_dirs, labels)
+    ]
     output_dir = build_output_dir(args.output_dir)
 
     save_summary(output_dir, runs)
@@ -358,6 +405,7 @@ def main() -> None:
         ylabel="Observed MSE",
         title="Observed MSE vs Step Comparison",
         band_floor=0.0,
+        max_step=args.max_step,
     )
     plot_metric(
         output_dir / "loss_vs_step_log10_comparison.png",
@@ -366,6 +414,7 @@ def main() -> None:
         std_attr="log10_loss_std",
         ylabel="log10(Observed MSE)",
         title="log10(Observed MSE) vs Step Comparison",
+        max_step=args.max_step,
     )
     plot_metric(
         output_dir / "cosine_similarity_vs_step_comparison.png",
@@ -374,6 +423,7 @@ def main() -> None:
         std_attr="cosine_std",
         ylabel="Cosine Similarity",
         title="Cosine Similarity vs Step Comparison",
+        max_step=args.max_step,
     )
 
     print("=" * 60)

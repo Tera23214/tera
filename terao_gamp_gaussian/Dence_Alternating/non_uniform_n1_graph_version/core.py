@@ -118,6 +118,7 @@ def train_single_replica(
     early_stop: bool = True,
     p: float = 0.5,
     r: float = 0.5,
+    init_epsilon: float | None = None,
     shared_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
@@ -161,6 +162,7 @@ def train_single_replica(
         return_history=return_history,
         loss_eval_interval=loss_eval_interval,
         early_stop=early_stop,
+        init_epsilon=init_epsilon,
         shared_data=shared_data,
     )
 

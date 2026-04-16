@@ -39,13 +39,13 @@ ALPHA_START =0
 ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 6000
-BATCH_SIZE = 5000
+MAX_STEPS = 50000
+BATCH_SIZE = 2000
 LR_SCHEDULE = [
     (0.0, 0.5, 1e-3),
-    (0.5, 1.5, 2e-3),
-    (1.5, 3.0, 3e-3),
-    (3.0, float("inf"), 3e-3),
+    (0.5, 1.5, 1.5e-3),
+    (1.5, 3.0, 1.5e-3),
+    (3.0, float("inf"), 1.5e-3),
 ]
 NOISE_VAR = 0
 SHARED_SEED = 1

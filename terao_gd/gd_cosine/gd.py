@@ -19,6 +19,8 @@ import math
 import time
 from datetime import datetime
 from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -42,14 +44,14 @@ ALPHA_START = 0
 ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 8000
+MAX_STEPS = 10000
 LR_BASE = 0.3   # Base learning rate (calibrated for N=1000)
 LR = LR_BASE / math.sqrt(N1 * N2 * M)  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
 NOISE_VAR = 0.0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 10   # Number of replicas per alpha
-CONVERGENCE_THRESHOLD = 1e-6  # Early stopping threshold for loss_per_edge
+CONVERGENCE_THRESHOLD = 1e-5  # Early stopping threshold for loss_per_edge
 
 # ============================================================================
 # AGD Helper Functions
@@ -562,12 +564,6 @@ if __name__ == "__main__":
     plots_dir = results_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
     
-    # Save plot
-    plot_path = plots_dir / "cosine_similarity_vs_alpha.png"
-    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-    print(f"Plot saved: {plot_path}")
-    plt.show()
-    
     # Save results to CSV
     csv_path = results_dir / "metrics.csv"
     with open(csv_path, 'w') as f:
@@ -590,11 +586,17 @@ if __name__ == "__main__":
             )
             for cosine_similarity_value, loss_v in zip(
                 r['cosine_similarity_values'], r['loss_values']
-            ):
+                ):
                 line += f",{cosine_similarity_value},{loss_v}"
             f.write(line + "\n")
     
     print(f"Metrics saved: {csv_path}")
+
+    # Save plot
+    plot_path = plots_dir / "cosine_similarity_vs_alpha.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"Plot saved: {plot_path}")
+    plt.close(fig)
     print(f"\nResults saved to: {results_dir}")
     
     print("Done!")

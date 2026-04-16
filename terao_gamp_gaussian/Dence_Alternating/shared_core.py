@@ -343,6 +343,41 @@ def build_shared_alpha_data(
     return shared_data
 
 
+def _initialize_student_factors(
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+    seed: int,
+    init_epsilon: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Initialize student factors.
+
+    When init_epsilon is provided, start near the teacher:
+        student = teacher + epsilon * N(0, 1)
+    and normalize each factor matrix to unit mean-square.
+    """
+    if init_epsilon is not None and init_epsilon < 0.0:
+        raise ValueError(
+            f"init_epsilon must be non-negative or None, got {init_epsilon}."
+        )
+
+    torch.manual_seed(seed + 2000)
+
+    if init_epsilon is None:
+        m_W = torch.randn_like(W_teacher)
+        m_X = torch.randn_like(X_teacher)
+    else:
+        noise_W = torch.randn_like(W_teacher)
+        noise_X = torch.randn_like(X_teacher)
+        m_W = normalize_to_unit_variance(W_teacher + init_epsilon * noise_W)
+        m_X = normalize_to_unit_variance(X_teacher + init_epsilon * noise_X)
+
+    v_W = torch.ones_like(m_W)
+    v_X = torch.ones_like(m_X)
+
+    return m_W, v_W, m_X, v_X
+
+
 def train_single_replica_from_shared_data(
     device: torch.device,
     seed: int,
@@ -357,6 +392,7 @@ def train_single_replica_from_shared_data(
     return_history: bool = False,
     loss_eval_interval: int = 50,
     early_stop: bool = True,
+    init_epsilon: float | None = None,
     shared_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
@@ -381,11 +417,12 @@ def train_single_replica_from_shared_data(
     N1, M = W_teacher.shape
     N2 = X_teacher.shape[1]
 
-    torch.manual_seed(seed + 2000)
-    m_W = torch.randn(N1, M, device=device)
-    v_W = torch.ones(N1, M, device=device)
-    m_X = torch.randn(M, N2, device=device)
-    v_X = torch.ones(M, N2, device=device)
+    m_W, v_W, m_X, v_X = _initialize_student_factors(
+        W_teacher=W_teacher,
+        X_teacher=X_teacher,
+        seed=seed,
+        init_epsilon=init_epsilon,
+    )
     g_prev_dense = torch.zeros((N1, N2), device=device)
 
     m_W_prev = m_W.clone()

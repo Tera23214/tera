@@ -5,14 +5,14 @@ algorithm: agd_cosine
 alpha_start: 0
 alpha_step: 0.2
 alpha_stop: 5
-convergence_threshold: 1.0e-06
+convergence_threshold: 1.0e-05
 device: mps
 early_stop_metric: loss_per_edge
 evaluation_metric: cosine_similarity_in_Y_space
 graph_seed: 1
 lr: 2.9999999999999997e-05
 lr_base: 0.3
-max_steps: 8000
+max_steps: 10000
 noise_seed: 1
 noise_var: 0.0
 num_replicas: 10

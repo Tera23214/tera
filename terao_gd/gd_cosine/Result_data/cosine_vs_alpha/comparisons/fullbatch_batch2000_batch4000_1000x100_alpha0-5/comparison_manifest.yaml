@@ -1,0 +1,14 @@
+comparison_name: fullbatch_batch2000_batch4000_1000x100_alpha0-5
+sources:
+- label: Full-batch
+  result_dir: /Users/teraokei/Project/tera/terao_gd/gd_cosine/Result_data/cosine_vs_alpha/Fullbatch_1000x100_alpha0-5
+  data_file: /Users/teraokei/Project/tera/terao_gd/gd_cosine/Result_data/cosine_vs_alpha/Fullbatch_1000x100_alpha0-5/plot.csv
+- label: Minibatch batch_size=2000
+  result_dir: /Users/teraokei/Project/tera/terao_gd/gd_cosine_minibatch/Result_data/cosine_vs_alpha/batch2000_1000x100_alpha0-5_batchsize2000
+  data_file: /Users/teraokei/Project/tera/terao_gd/gd_cosine_minibatch/Result_data/cosine_vs_alpha/batch2000_1000x100_alpha0-5_batchsize2000/metrics.csv
+- label: Minibatch batch_size=4000
+  result_dir: /Users/teraokei/Project/tera/terao_gd/gd_cosine_minibatch/Result_data/cosine_vs_alpha/batch4000_1000x100_alpha0-5
+  data_file: /Users/teraokei/Project/tera/terao_gd/gd_cosine_minibatch/Result_data/cosine_vs_alpha/batch4000_1000x100_alpha0-5/metrics.csv
+outputs:
+  plot_path: /Users/teraokei/Project/tera/terao_gd/gd_cosine/Result_data/cosine_vs_alpha/comparisons/fullbatch_batch2000_batch4000_1000x100_alpha0-5/cosine_similarity_comparison.png
+  csv_path: /Users/teraokei/Project/tera/terao_gd/gd_cosine/Result_data/cosine_vs_alpha/comparisons/fullbatch_batch2000_batch4000_1000x100_alpha0-5/comparison_series.csv
