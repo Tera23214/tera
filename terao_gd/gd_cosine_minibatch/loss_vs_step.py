@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=1.5e-3,
+        default=2e-3,
         help="Learning rate. Defaults to lr_base / sqrt(batch_size).",
     )
     parser.add_argument(

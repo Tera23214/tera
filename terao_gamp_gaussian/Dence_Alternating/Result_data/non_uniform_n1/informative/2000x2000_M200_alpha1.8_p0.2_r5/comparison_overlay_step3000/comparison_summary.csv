@@ -1,5 +1,0 @@
-label,result_dir,alpha,N1,N2,M,noise_var,num_replicas,max_recorded_step,final_loss_mean,final_cosine_similarity_mean,mean_runtime_sec
-non-informative,/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/non-informative,1.8,2000,2000,200,1e-05,3,3000,1.2233974536e-01,5.3157416979e-01,1139.9565
-epsilon=0.1,/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/ε_0.1,1.8,2000,2000,200,1e-05,3,3000,1.6115641594e-01,8.2427279154e-01,572.1829
-epsilon=1,/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/ε_1,1.8,2000,2000,200,1e-05,3,3000,1.8283679088e-01,8.3259207010e-01,566.1526
-epsilon=2,/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/ε_2,1.8,2000,2000,200,1e-05,3,3000,1.7350095014e-01,8.0322313309e-01,565.2345

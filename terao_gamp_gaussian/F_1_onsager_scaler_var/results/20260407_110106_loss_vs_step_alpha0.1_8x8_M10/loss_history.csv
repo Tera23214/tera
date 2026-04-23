@@ -1,2 +1,0 @@
-step,loss_mean,loss_std,log10_loss_mean,log10_loss_std,clean_loss_mean,clean_loss_std,log10_clean_loss_mean,log10_clean_loss_std,qy_mean,qy_std,loss_replica_1,clean_loss_replica_1,qy_replica_1
-1,1.5631302834e+01,0.0000000000e+00,1.1939951770e+00,0.0000000000e+00,1.5900578499e+01,0.0000000000e+00,1.2014129252e+00,0.0000000000e+00,-5.0565600395e-03,0.0000000000e+00,1.5631302834e+01,1.5900578499e+01,-5.0565600395e-03

@@ -42,3 +42,27 @@ ENV/
 .DS_Store
 Thumbs.db
 *.log
+
+# =============================================================================
+# Simulation outputs
+# =============================================================================
+**/results/
+**/Result_data/
+**/result_data/
+**/local_results/
+**/plots/
+
+# Generated experiment files
+**/metrics.csv
+**/replica_summary.csv
+**/progress.yaml
+
+# Generated data / figures
+*.npy
+*.npz
+*.pt
+*.pth
+*.tmp
+*.png
+*.pdf
+*.svg

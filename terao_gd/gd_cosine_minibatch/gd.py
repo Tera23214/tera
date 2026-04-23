@@ -53,6 +53,7 @@ STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 5
 CONVERGENCE_THRESHOLD = 1e-5
 LOSS_EVAL_INTERVAL = 100
+SAVE_EVERY_REPLICAS = 5
 
 
 # ============================================================================
@@ -422,34 +423,40 @@ def train_single_replica(
 
 def save_metrics_csv(
     results_dir: Path,
-    results: dict[float, dict[str, float | list[float]]],
+    results: dict[float, dict[str, float | int | list[float] | list[int]]],
     alphas_list: list[float],
     num_replicas: int,
 ) -> None:
     csv_path = results_dir / "metrics.csv"
-    with open(csv_path, "w") as f:
-        header = (
-            "alpha,lr,num_observed,effective_epochs,"
-            "cosine_similarity_mean,cosine_similarity_std,"
-            "Loss_mean,Loss_std,Steps_mean"
-        )
-        for i in range(num_replicas):
-            header += f",cosine_similarity_replica_{i},loss_replica_{i}"
-        f.write(header + "\n")
+    lines = []
+    header = (
+        "alpha,lr,num_observed,effective_epochs,completed_replicas,"
+        "cosine_similarity_mean,cosine_similarity_std,"
+        "Loss_mean,Loss_std,Steps_mean"
+    )
+    for i in range(num_replicas):
+        header += f",cosine_similarity_replica_{i},loss_replica_{i}"
+    lines.append(header)
 
-        for alpha in alphas_list:
-            r = results[alpha]
-            line = (
-                f"{alpha},{r['lr']},{r['num_observed']},{r['effective_epochs']},"
-                f"{r['cosine_similarity_mean']},"
-                f"{r['cosine_similarity_std']},{r['loss_mean']},"
-                f"{r['loss_std']},{r['steps_mean']}"
-            )
-            for cosine_similarity_value, loss_v in zip(
-                r["cosine_similarity_values"], r["loss_values"]
-            ):
-                line += f",{cosine_similarity_value},{loss_v}"
-            f.write(line + "\n")
+    for alpha in alphas_list:
+        r = results[alpha]
+        cosine_similarity_values = list(r["cosine_similarity_values"])
+        loss_values = list(r["loss_values"])
+        completed_replicas = int(r.get("completed_replicas", len(cosine_similarity_values)))
+        line = (
+            f"{alpha},{r['lr']},{r['num_observed']},{r['effective_epochs']},"
+            f"{completed_replicas},{r['cosine_similarity_mean']},"
+            f"{r['cosine_similarity_std']},{r['loss_mean']},"
+            f"{r['loss_std']},{r['steps_mean']}"
+        )
+        for replica_idx in range(num_replicas):
+            if replica_idx < len(cosine_similarity_values):
+                line += f",{cosine_similarity_values[replica_idx]},{loss_values[replica_idx]}"
+            else:
+                line += ",,"
+        lines.append(line)
+
+    write_text_atomic(csv_path, "\n".join(lines) + "\n")
 
 
 def save_replica_summary(
@@ -457,18 +464,72 @@ def save_replica_summary(
     replica_records: list[dict[str, float | int]],
 ) -> None:
     summary_path = results_dir / "replica_summary.csv"
-    with open(summary_path, "w") as f:
-        f.write(
-            "alpha,lr,num_observed,effective_epochs,replica,seed,runtime_sec,"
-            "final_loss,steps_taken,cosine_similarity\n"
+    lines = [
+        "alpha,lr,num_observed,effective_epochs,replica,seed,runtime_sec,"
+        "final_loss,steps_taken,cosine_similarity"
+    ]
+    for record in replica_records:
+        lines.append(
+            f"{record['alpha']},{record['lr']},{record['num_observed']},"
+            f"{record['effective_epochs']},{record['replica']},{record['seed']},"
+            f"{record['runtime_sec']:.4f},{record['final_loss']:.10e},"
+            f"{record['steps_taken']},{record['cosine_similarity']:.10e}"
         )
-        for record in replica_records:
-            f.write(
-                f"{record['alpha']},{record['lr']},{record['num_observed']},"
-                f"{record['effective_epochs']},{record['replica']},{record['seed']},"
-                f"{record['runtime_sec']:.4f},{record['final_loss']:.10e},"
-                f"{record['steps_taken']},{record['cosine_similarity']:.10e}\n"
-            )
+    write_text_atomic(summary_path, "\n".join(lines) + "\n")
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text)
+    tmp_path.replace(path)
+
+
+def build_alpha_result(
+    lr_alpha: float,
+    num_observed: int,
+    effective_epochs: float,
+    cosine_similarity_values: list[float],
+    loss_values: list[float],
+    steps_values: list[int],
+) -> dict[str, float | int | list[float] | list[int]]:
+    return {
+        "lr": lr_alpha,
+        "num_observed": num_observed,
+        "effective_epochs": effective_epochs,
+        "completed_replicas": len(cosine_similarity_values),
+        "cosine_similarity_mean": float(np.mean(cosine_similarity_values)),
+        "cosine_similarity_std": float(np.std(cosine_similarity_values)),
+        "cosine_similarity_values": cosine_similarity_values.copy(),
+        "loss_mean": float(np.mean(loss_values)),
+        "loss_std": float(np.std(loss_values)),
+        "loss_values": loss_values.copy(),
+        "steps_mean": float(np.mean(steps_values)),
+        "steps_values": steps_values.copy(),
+    }
+
+
+def save_progress_outputs(
+    results_dir: Path,
+    results: dict[float, dict[str, float | int | list[float] | list[int]]],
+    replica_records: list[dict[str, float | int]],
+    num_replicas: int,
+    completed: int,
+    total_tasks: int,
+    start_time: float,
+    status: str,
+) -> None:
+    alphas_list = sorted(results.keys())
+    save_metrics_csv(results_dir, results, alphas_list, num_replicas)
+    save_replica_summary(results_dir, replica_records)
+    status_path = results_dir / "progress.yaml"
+    status_data = {
+        "status": status,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "completed_tasks": completed,
+        "total_tasks": total_tasks,
+        "elapsed_sec": time.time() - start_time,
+    }
+    write_text_atomic(status_path, yaml.dump(status_data, default_flow_style=False))
 
 
 # ============================================================================
@@ -541,6 +602,7 @@ if __name__ == "__main__":
         "num_replicas": NUM_REPLICAS,
         "convergence_threshold": CONVERGENCE_THRESHOLD,
         "loss_eval_interval": LOSS_EVAL_INTERVAL,
+        "save_every_replicas": SAVE_EVERY_REPLICAS,
         "early_stop_metric": "abs_delta_loss_per_edge",
         "device": str(device),
         "evaluation_metric": "cosine_similarity_in_Y_space",
@@ -570,87 +632,110 @@ if __name__ == "__main__":
         noise_var=NOISE_VAR,
     )
 
-    for alpha in alphas:
-        shared_data = prepare_shared_alpha_data(
-            alpha=alpha,
-            device=device,
-            seed=SHARED_SEED,
-            N1=N1,
-            N2=N2,
-            M=M,
-            noise_var=NOISE_VAR,
-            global_data=global_data,
-        )
-        num_observed = int(shared_data["num_observed"])
-        lr_alpha = resolve_lr(float(alpha))
-        effective_epochs = compute_effective_epochs(
-            num_observed=num_observed,
-            batch_size=BATCH_SIZE,
-            max_steps=MAX_STEPS,
-        )
-        print(
-            f"α={alpha:.2f}: E={num_observed}, lr={lr_alpha:.3e}, "
-            f"effective_epochs={effective_epochs:.2f}"
-        )
-
-        cosine_similarity_values = []
-        loss_values = []
-        steps_values = []
-
-        for replica_id in range(NUM_REPLICAS):
-            replica_seed = STUDENT_SEED_BASE + replica_id
-            t0 = time.time()
-            cosine_similarity, final_loss, steps_taken = train_single_replica(
+    interrupted = False
+    try:
+        for alpha in alphas:
+            alpha_key = float(alpha)
+            shared_data = prepare_shared_alpha_data(
                 alpha=alpha,
                 device=device,
-                seed=replica_seed,
+                seed=SHARED_SEED,
                 N1=N1,
                 N2=N2,
                 M=M,
-                max_steps=MAX_STEPS,
-                lr=lr_alpha,
-                batch_size=BATCH_SIZE,
                 noise_var=NOISE_VAR,
-                convergence_threshold=CONVERGENCE_THRESHOLD,
-                shared_data=shared_data,
+                global_data=global_data,
             )
-            dt = time.time() - t0
-            cosine_similarity_values.append(cosine_similarity)
-            loss_values.append(final_loss)
-            steps_values.append(steps_taken)
-            completed += 1
-            replica_records.append(
-                {
-                    "alpha": float(alpha),
-                    "lr": lr_alpha,
-                    "num_observed": num_observed,
-                    "effective_epochs": effective_epochs,
-                    "replica": replica_id + 1,
-                    "seed": replica_seed,
-                    "runtime_sec": dt,
-                    "final_loss": final_loss,
-                    "steps_taken": steps_taken,
-                    "cosine_similarity": cosine_similarity,
-                }
+            num_observed = int(shared_data["num_observed"])
+            lr_alpha = resolve_lr(alpha_key)
+            effective_epochs = compute_effective_epochs(
+                num_observed=num_observed,
+                batch_size=BATCH_SIZE,
+                max_steps=MAX_STEPS,
             )
             print(
-                f"α={alpha:.2f}, replica {replica_id + 1}/{NUM_REPLICAS}: "
-                f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
-                f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
+                f"α={alpha:.2f}: E={num_observed}, lr={lr_alpha:.3e}, "
+                f"effective_epochs={effective_epochs:.2f}"
             )
 
-        results[alpha] = {
-            "lr": lr_alpha,
-            "num_observed": num_observed,
-            "effective_epochs": effective_epochs,
-            "cosine_similarity_mean": np.mean(cosine_similarity_values),
-            "cosine_similarity_std": np.std(cosine_similarity_values),
-            "cosine_similarity_values": cosine_similarity_values,
-            "loss_mean": np.mean(loss_values),
-            "loss_std": np.std(loss_values),
-            "loss_values": loss_values,
-            "steps_mean": np.mean(steps_values),
-        }
+            cosine_similarity_values = []
+            loss_values = []
+            steps_values = []
+
+            for replica_id in range(NUM_REPLICAS):
+                replica_seed = STUDENT_SEED_BASE + replica_id
+                t0 = time.time()
+                cosine_similarity, final_loss, steps_taken = train_single_replica(
+                    alpha=alpha,
+                    device=device,
+                    seed=replica_seed,
+                    N1=N1,
+                    N2=N2,
+                    M=M,
+                    max_steps=MAX_STEPS,
+                    lr=lr_alpha,
+                    batch_size=BATCH_SIZE,
+                    noise_var=NOISE_VAR,
+                    convergence_threshold=CONVERGENCE_THRESHOLD,
+                    shared_data=shared_data,
+                )
+                dt = time.time() - t0
+                cosine_similarity_values.append(cosine_similarity)
+                loss_values.append(final_loss)
+                steps_values.append(steps_taken)
+                completed += 1
+                replica_records.append(
+                    {
+                        "alpha": alpha_key,
+                        "lr": lr_alpha,
+                        "num_observed": num_observed,
+                        "effective_epochs": effective_epochs,
+                        "replica": replica_id + 1,
+                        "seed": replica_seed,
+                        "runtime_sec": dt,
+                        "final_loss": final_loss,
+                        "steps_taken": steps_taken,
+                        "cosine_similarity": cosine_similarity,
+                    }
+                )
+                results[alpha_key] = build_alpha_result(
+                    lr_alpha=lr_alpha,
+                    num_observed=num_observed,
+                    effective_epochs=effective_epochs,
+                    cosine_similarity_values=cosine_similarity_values,
+                    loss_values=loss_values,
+                    steps_values=steps_values,
+                )
+                print(
+                    f"α={alpha:.2f}, replica {replica_id + 1}/{NUM_REPLICAS}: "
+                    f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
+                    f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
+                )
+                if completed % SAVE_EVERY_REPLICAS == 0:
+                    save_progress_outputs(
+                        results_dir=results_dir,
+                        results=results,
+                        replica_records=replica_records,
+                        num_replicas=NUM_REPLICAS,
+                        completed=completed,
+                        total_tasks=total_tasks,
+                        start_time=start_time,
+                        status="running",
+                    )
+                    print(f"Progress saved: {results_dir}")
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupted. Saving partial outputs before exit...")
+        save_progress_outputs(
+            results_dir=results_dir,
+            results=results,
+            replica_records=replica_records,
+            num_replicas=NUM_REPLICAS,
+            completed=completed,
+            total_tasks=total_tasks,
+            start_time=start_time,
+            status="interrupted",
+        )
 
     total_time = time.time() - start_time
 
@@ -671,6 +756,11 @@ if __name__ == "__main__":
     print(f"\nTotal time: {total_time:.1f}s")
     print("=" * 60)
 
+    if not results:
+        print("\nNo completed replicas yet; metrics headers were saved.")
+        print(f"Results saved to: {results_dir}")
+        sys.exit(130 if interrupted else 0)
+
     print("\nGenerating plots...")
     alphas_list = sorted(results.keys())
     cosine_similarity_means = [
@@ -680,8 +770,16 @@ if __name__ == "__main__":
         results[a]["cosine_similarity_std"] for a in alphas_list
     ]
 
-    save_metrics_csv(results_dir, results, alphas_list, NUM_REPLICAS)
-    save_replica_summary(results_dir, replica_records)
+    save_progress_outputs(
+        results_dir=results_dir,
+        results=results,
+        replica_records=replica_records,
+        num_replicas=NUM_REPLICAS,
+        completed=completed,
+        total_tasks=total_tasks,
+        start_time=start_time,
+        status="interrupted" if interrupted else "completed",
+    )
     print(f"Metrics saved: {results_dir / 'metrics.csv'}")
     print(f"Replica summary saved: {results_dir / 'replica_summary.csv'}")
 
