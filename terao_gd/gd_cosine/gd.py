@@ -40,17 +40,17 @@ N1 = 1000   # Number of rows
 N2 = 1000   # Number of columns  
 M = 100     # Rank (hidden dimension)
 
-ALPHA_START = 0
-ALPHA_STOP = 5
+ALPHA_START = 1.2
+ALPHA_STOP = 2.8
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 10000
+MAX_STEPS = 100000
 LR_BASE = 0.3   # Base learning rate (calibrated for N=1000)
 LR = LR_BASE / math.sqrt(N1 * N2 * M)  # Auto-scale: 0.01 for N=1000, ~0.001 for N=3000
 NOISE_VAR = 0.0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
-NUM_REPLICAS = 10   # Number of replicas per alpha
+NUM_REPLICAS = 5   # Number of replicas per alpha
 CONVERGENCE_THRESHOLD = 1e-5  # Early stopping threshold for loss_per_edge
 
 # ============================================================================
@@ -539,14 +539,10 @@ if __name__ == "__main__":
     cosine_similarity_stds = [
         results[a]['cosine_similarity_std'] for a in alphas_list
     ]
-    # Standard Error of Mean (SEM) = std / sqrt(N)
-    cosine_similarity_sems = [
-        std / math.sqrt(NUM_REPLICAS) for std in cosine_similarity_stds
-    ]
     
     fig, ax = plt.subplots(figsize=(10, 7))
     
-    ax.errorbar(alphas_list, cosine_similarity_means, yerr=cosine_similarity_sems, 
+    ax.errorbar(alphas_list, cosine_similarity_means, yerr=cosine_similarity_stds, 
                 fmt='o-', color='#1E88E5', markersize=6, linewidth=2,
                 capsize=4, capthick=1.5, elinewidth=1.5)
     ax.set_xlabel(r'$\alpha$ (observation density)', fontsize=14)

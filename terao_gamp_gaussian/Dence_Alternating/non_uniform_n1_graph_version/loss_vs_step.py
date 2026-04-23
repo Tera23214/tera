@@ -63,13 +63,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot loss vs step for fixed alpha (non-uniform N1 graph)."
     )
-    parser.add_argument("--alpha", type=float, default=2.5)
+    parser.add_argument("--alpha", type=float, default=1.8)
     parser.add_argument("--N1", type=int, default=2000)
     parser.add_argument("--N2", type=int, default=2000)
     parser.add_argument("--M", type=int, default=200)
     parser.add_argument("--p", type=float, default=0.2)
     parser.add_argument("--r", type=float, default=5)
-    parser.add_argument("--max-steps", type=int, default=5000)
+    parser.add_argument("--max-steps", type=int, default=15000)
     parser.add_argument("--damping", type=float, default=0)
     parser.add_argument(
         "--damping-schedule",
@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-scale", type=float, default=1e-2)
     parser.add_argument("--beta-max", type=float, default=0.4)
     parser.add_argument("--noise-var", type=float, default=1e-5)
-    parser.add_argument("--init-epsilon", type=float, default=4)
+    parser.add_argument("--init-epsilon", type=float, default=0.1)
     parser.add_argument("--graph-seed", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=3)

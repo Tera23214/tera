@@ -82,7 +82,7 @@ def resolve_two_point_degrees(
     num_ca = int(round(p * N1))
     num_ca = max(0, min(num_ca, N1))
     num_cb = N1 - num_ca
-    p_eff = num_ca / N1
+    p_eff = num_ca / N1 #実際に用いたp
 
     target_mean_degree = alpha * M
     target_total_degree_float = alpha * M * N1

@@ -31,15 +31,15 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 1000
-N2 = 1000
+N1 = 10000
+N2 = 10000
 M = 100
 
 ALPHA_START =0
 ALPHA_STOP = 5
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 50000
+MAX_STEPS = 500000
 BATCH_SIZE = 2000
 LR_SCHEDULE = [
     (0.0, 0.5, 1e-3),
@@ -47,12 +47,12 @@ LR_SCHEDULE = [
     (1.5, 3.0, 1.5e-3),
     (3.0, float("inf"), 1.5e-3),
 ]
-NOISE_VAR = 0
+NOISE_VAR = 1
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
-NUM_REPLICAS = 10
+NUM_REPLICAS = 5
 CONVERGENCE_THRESHOLD = 1e-5
-LOSS_EVAL_INTERVAL = 50
+LOSS_EVAL_INTERVAL = 100
 
 
 # ============================================================================
@@ -679,9 +679,6 @@ if __name__ == "__main__":
     cosine_similarity_stds = [
         results[a]["cosine_similarity_std"] for a in alphas_list
     ]
-    cosine_similarity_sems = [
-        std / math.sqrt(NUM_REPLICAS) for std in cosine_similarity_stds
-    ]
 
     save_metrics_csv(results_dir, results, alphas_list, NUM_REPLICAS)
     save_replica_summary(results_dir, replica_records)
@@ -692,7 +689,7 @@ if __name__ == "__main__":
     ax.errorbar(
         alphas_list,
         cosine_similarity_means,
-        yerr=cosine_similarity_sems,
+        yerr=cosine_similarity_stds,
         fmt="o-",
         color="#1E88E5",
         markersize=6,

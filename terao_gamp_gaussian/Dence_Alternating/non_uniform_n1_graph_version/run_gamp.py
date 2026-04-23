@@ -4,7 +4,6 @@ Dense-mask alternating G-AMP simulation runner with the non-uniform N1 graph
 version based on graph_core.two_point.
 """
 
-import math
 import sys
 import time
 from datetime import datetime
@@ -37,14 +36,14 @@ N2 = 2000
 M = 200
 
 ALPHA_START = 0.2
-ALPHA_STOP = 5.0
+ALPHA_STOP = 4.0
 ALPHA_STEP = 0.2
 
 P = 0.2
 R = 5
 INIT_EPSILON = None #uninformative => None, studet = teacher + epsilon*N(0,1)
 
-MAX_STEPS = 10000
+MAX_STEPS = 50000
 DAMPING = 0
 USE_STEP_DAMPING = False
 DAMPING_BETA_SCALE = 1e-3
@@ -236,15 +235,12 @@ if __name__ == "__main__":
     alphas_list = sorted(results.keys())
     cosine_similarity_means = [results[a]["cosine_similarity_mean"] for a in alphas_list]
     cosine_similarity_stds = [results[a]["cosine_similarity_std"] for a in alphas_list]
-    cosine_similarity_sems = [
-        std / math.sqrt(NUM_REPLICAS) for std in cosine_similarity_stds
-    ]
 
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.errorbar(
         alphas_list,
         cosine_similarity_means,
-        yerr=cosine_similarity_sems,
+        yerr=cosine_similarity_stds,
         fmt="o-",
         color="#D81B60",
         markersize=6,

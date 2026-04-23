@@ -1,0 +1,39 @@
+algorithm_family: Dence_Alternating_loss_vs_step_comparison
+num_inputs: 4
+max_recorded_step: 3000
+inputs:
+- label: non-informative
+  result_dir: /Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/non-informative
+  alpha: 1.8
+  N1: 2000
+  N2: 2000
+  M: 200
+  noise_var: 1.0e-05
+  num_replicas: 3
+- label: epsilon=0.1
+  result_dir: "/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/\u03B5\
+    _0.1"
+  alpha: 1.8
+  N1: 2000
+  N2: 2000
+  M: 200
+  noise_var: 1.0e-05
+  num_replicas: 3
+- label: epsilon=1
+  result_dir: "/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/\u03B5\
+    _1"
+  alpha: 1.8
+  N1: 2000
+  N2: 2000
+  M: 200
+  noise_var: 1.0e-05
+  num_replicas: 3
+- label: epsilon=2
+  result_dir: "/Users/teraokei/Project/tera/terao_gamp_gaussian/Dence_Alternating/Result_data/non_uniform_n1/informative/2000x2000_M200_alpha1.8_p0.2_r5/\u03B5\
+    _2"
+  alpha: 1.8
+  N1: 2000
+  N2: 2000
+  M: 200
+  noise_var: 1.0e-05
+  num_replicas: 3

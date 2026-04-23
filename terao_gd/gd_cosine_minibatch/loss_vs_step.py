@@ -44,11 +44,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot mini-batch SGD loss vs step for fixed alpha."
     )
-    parser.add_argument("--alpha", type=float, default=4)
-    parser.add_argument("--N1", type=int, default=1000)
-    parser.add_argument("--N2", type=int, default=1000)
+    parser.add_argument("--alpha", type=float, default=3)
+    parser.add_argument("--N1", type=int, default=10000)
+    parser.add_argument("--N2", type=int, default=10000)
     parser.add_argument("--M", type=int, default=100)
-    parser.add_argument("--max-steps", type=int, default=15000)
+    parser.add_argument("--max-steps", type=int, default=200000)
     parser.add_argument(
         "--lr",
         type=float,

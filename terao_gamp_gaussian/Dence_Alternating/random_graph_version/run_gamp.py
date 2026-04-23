@@ -3,7 +3,6 @@
 Dense-mask alternating G-AMP simulation runner with the random-graph version.
 """
 
-import math
 import sys
 import time
 from datetime import datetime
@@ -201,15 +200,12 @@ if __name__ == "__main__":
     alphas_list = sorted(results.keys())
     cosine_similarity_means = [results[a]["cosine_similarity_mean"] for a in alphas_list]
     cosine_similarity_stds = [results[a]["cosine_similarity_std"] for a in alphas_list]
-    cosine_similarity_sems = [
-        std / math.sqrt(NUM_REPLICAS) for std in cosine_similarity_stds
-    ]
 
     fig, ax = plt.subplots(figsize=(10, 7))
     ax.errorbar(
         alphas_list,
         cosine_similarity_means,
-        yerr=cosine_similarity_sems,
+        yerr=cosine_similarity_stds,
         fmt="o-",
         color="#1976D2",
         markersize=6,
