@@ -34,12 +34,12 @@ sys.path.insert(0, str(repo_root))
 from terao_gamp_gaussian.graph import RandomGraph
 
 
-N = 10000
+N = 1000
 M = 100
 LAMBDA = 1.0
 
-ALPHA_START = 5.2
-ALPHA_STOP = 7.0
+ALPHA_START = 0
+ALPHA_STOP = 5.0
 ALPHA_STEP = 0.2
 
 MAX_STEPS = 500000
@@ -50,7 +50,7 @@ LR_SCHEDULE = [
     (1.5, 3.0, 1.5e-3),
     (3.0, float("inf"), 1.5e-3),
 ]
-NOISE_VAR = 1.0
+NOISE_VAR = 0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 5
