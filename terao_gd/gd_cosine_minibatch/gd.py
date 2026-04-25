@@ -369,8 +369,8 @@ def train_single_replica(
     N2 = X_teacher.shape[1]
 
     torch.manual_seed(seed + 2000)
-    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
-    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
+    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) 
+    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) 
 
     final_loss = 0.0
     steps_taken = max_steps
