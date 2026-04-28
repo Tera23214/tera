@@ -3,6 +3,7 @@ Alternating mini-batch SGD utilities for the F-random observation model.
 """
 
 from .gd import (
+    compute_full_predictions,
     compute_predictions,
     compute_y_cosine_similarity,
     prepare_shared_alpha_data,
@@ -11,6 +12,7 @@ from .gd import (
 )
 
 __all__ = [
+    "compute_full_predictions",
     "compute_predictions",
     "compute_y_cosine_similarity",
     "prepare_shared_alpha_data",

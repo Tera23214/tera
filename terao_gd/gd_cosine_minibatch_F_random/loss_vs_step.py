@@ -3,10 +3,10 @@
 Plot mini-batch SGD loss vs step for the F-random observation model.
 
 Training model:
-    Y = lambda / (N * sqrt(M)) * F W X + noise
+    Y_ij = lambda / sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise
 
 The student receives the full F and estimates W, X by alternating mini-batch
-SGD. The dominant operation is the dense product F @ W.
+SGD.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         description="Plot mini-batch SGD loss vs step for F-random model."
     )
     parser.add_argument("--alpha", type=float, default=3.0)
-    parser.add_argument("--N", type=int, default=10000)
+    parser.add_argument("--N", type=int, default=1000)
     parser.add_argument("--M", type=int, default=100)
     parser.add_argument("--lambda", dest="lambda_", type=float, default=LAMBDA)
     parser.add_argument("--max-steps", type=int, default=200000)
@@ -110,8 +110,10 @@ def save_config(
         "N": args.N,
         "M": args.M,
         "lambda": args.lambda_,
-        "observation_model": "Y = lambda/(N*sqrt(M)) * F W X + noise",
-        "F_shape": [args.N, args.N],
+        "observation_model": (
+            "Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise"
+        ),
+        "F_shape": [args.N, args.N, args.M],
         "F_distribution": "standard_normal",
         "max_steps": args.max_steps,
         "lr": lr,
@@ -129,7 +131,7 @@ def save_config(
         "record_interval": args.record_interval,
         "device": str(device),
         "student_init": "standard_normal_scaled_0.01",
-        "evaluation_metric": "cosine_similarity_in_FWX_Y_space",
+        "evaluation_metric": "cosine_similarity_in_full_Y_space",
         "sampling": "with_replacement",
         "shared_teacher_F_noise_global": True,
         "shared_per_alpha_graph_noise": True,
@@ -330,8 +332,8 @@ def run_single_replica_with_history(
     num_observed = int(shared_data["num_observed"])
 
     torch.manual_seed(seed + 2000)
-    w_hat = torch.randn(N, M, device=device, dtype=torch.float32) * 0.01
-    x_hat = torch.randn(M, N, device=device, dtype=torch.float32) * 0.01
+    w_hat = torch.randn(N, M, device=device, dtype=torch.float32)
+    x_hat = torch.randn(M, N, device=device, dtype=torch.float32)
 
     history_steps: list[int] = []
     history_losses: list[float] = []
@@ -403,7 +405,7 @@ def main() -> None:
 
     print("=" * 60)
     print("Loss vs Step for F-random Mini-batch SGD")
-    print("Observation: Y = lambda/(N*sqrt(M)) * F W X + noise")
+    print("Observation: Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise")
     print("=" * 60)
     print(f"Device: {device}")
     print(f"alpha={args.alpha}, N={args.N}, M={args.M}, lambda={args.lambda_}")

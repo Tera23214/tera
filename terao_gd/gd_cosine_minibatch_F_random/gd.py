@@ -3,16 +3,14 @@
 Alternating mini-batch SGD for the F-random observation model.
 
 Observation model:
-    Y = lambda / (N * sqrt(M)) * F W X + noise
+    Y_ij = lambda / sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise
 
 where
-    F: (N, N), F_ab ~ N(0, 1)
+    F: (N, N, M), F_ij,mu ~ N(0, 1)
     W: (N, M)
     X: (M, N)
 
 F is generated once, shared with the student perfectly, and never optimized.
-The implementation is arranged around dense ``F @ W`` products so the dominant
-work is GPU-friendly matrix multiplication.
 """
 
 from __future__ import annotations
@@ -59,13 +57,22 @@ LOSS_EVAL_INTERVAL = 100
 SAVE_EVERY_REPLICAS = 5
 
 
-def observation_scale(N: int, M: int, lambda_: float) -> float:
-    return float(lambda_ / (N * math.sqrt(M)))
+def observation_scale(M: int, lambda_: float) -> float:
+    return float(lambda_ / math.sqrt(M))
 
 
-def compute_fw(F: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
-    """Compute the dense GPU-friendly product F @ W."""
-    return F @ W
+def compute_full_predictions(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    F: torch.Tensor,
+    M: int,
+    lambda_: float = LAMBDA,
+) -> torch.Tensor:
+    """
+    Compute predictions for every (i, j):
+        Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j.
+    """
+    return observation_scale(M, lambda_) * torch.einsum("ijm,im,mj->ij", F, W, X)
 
 
 def compute_predictions(
@@ -76,17 +83,16 @@ def compute_predictions(
     j_idx: torch.Tensor,
     M: int,
     lambda_: float = LAMBDA,
-    FW: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    Compute observed predictions from lambda/(N*sqrt(M)) * F W X.
+    Compute observed predictions from lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j.
     """
-    N = F.shape[0]
-    if FW is None:
-        FW = compute_fw(F, W)
-    fw_sel = FW[i_idx.long(), :]
-    x_sel = X[:, j_idx.long()].T
-    return observation_scale(N, M, lambda_) * (fw_sel * x_sel).sum(dim=1)
+    i_long = i_idx.long()
+    j_long = j_idx.long()
+    f_sel = F[i_long, j_long, :]
+    w_sel = W[i_long, :]
+    x_sel = X[:, j_long].T
+    return observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
 
 
 def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
@@ -137,26 +143,22 @@ def sgd_step_W(
 ) -> torch.Tensor:
     """
     Mini-batch gradient step for W.
-
-    For a batch, the gradient can be written as a dense matrix multiply:
-        grad_W = F_batch.T @ G
-    where G has shape (batch_size, M). This keeps the expensive operation in a
-    form GPUs handle well.
     """
-    N, M = W.shape
+    _, M = W.shape
     batch_i = i_idx[batch_positions].long()
     batch_j = j_idx[batch_positions].long()
     batch_y = Y[batch_positions]
 
-    FW = compute_fw(F, W)
-    fw_sel = FW[batch_i, :]
+    f_sel = F[batch_i, batch_j, :]
+    w_sel = W[batch_i, :]
     x_sel = X[:, batch_j].T
-    y_pred = observation_scale(N, M, lambda_) * (fw_sel * x_sel).sum(dim=1)
+    y_pred = observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
     residual = y_pred - batch_y
 
-    coeff = 2.0 * M * observation_scale(N, M, lambda_)
-    weighted_x = coeff * residual.unsqueeze(1) * x_sel
-    grad_W = F[batch_i, :].T @ weighted_x
+    coeff = 2.0 * M * observation_scale(M, lambda_)
+    grad_contrib = coeff * residual.unsqueeze(1) * f_sel * x_sel
+    grad_W = torch.zeros_like(W)
+    grad_W.scatter_add_(0, batch_i.unsqueeze(1).expand(-1, M), grad_contrib)
     return W - lr * grad_W
 
 
@@ -172,21 +174,21 @@ def sgd_step_X(
     lambda_: float = LAMBDA,
 ) -> torch.Tensor:
     """
-    Mini-batch gradient step for X using the current dense product F @ W.
+    Mini-batch gradient step for X.
     """
-    M, N = X.shape
+    M, _ = X.shape
     batch_i = i_idx[batch_positions].long()
     batch_j = j_idx[batch_positions].long()
     batch_y = Y[batch_positions]
 
-    FW = compute_fw(F, W)
-    fw_sel = FW[batch_i, :]
+    f_sel = F[batch_i, batch_j, :]
+    w_sel = W[batch_i, :]
     x_sel = X[:, batch_j].T
-    y_pred = observation_scale(N, M, lambda_) * (fw_sel * x_sel).sum(dim=1)
+    y_pred = observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
     residual = y_pred - batch_y
 
-    coeff = 2.0 * M * observation_scale(N, M, lambda_)
-    grad_contrib = coeff * residual.unsqueeze(1) * fw_sel
+    coeff = 2.0 * M * observation_scale(M, lambda_)
+    grad_contrib = coeff * residual.unsqueeze(1) * f_sel * w_sel
     grad_X = torch.zeros_like(X)
     grad_X.scatter_add_(1, batch_j.unsqueeze(0).expand(M, -1), grad_contrib.T)
     return X - lr * grad_X
@@ -207,17 +209,14 @@ def compute_y_cosine_similarity(
     F: torch.Tensor,
 ) -> float:
     """
-    Cosine similarity in Y-space for F W X without materializing N x N Y.
+    Cosine similarity over the full N x N Y-space.
     """
-    FW_teacher = compute_fw(F, W_teacher)
-    FW_student = compute_fw(F, W_student)
-
-    cross_left = FW_teacher.T @ FW_student
-    cross_right = X_student @ X_teacher.T
-    inner = torch.trace(cross_left @ cross_right)
-
-    teacher_norm_sq = torch.trace((FW_teacher.T @ FW_teacher) @ (X_teacher @ X_teacher.T))
-    student_norm_sq = torch.trace((FW_student.T @ FW_student) @ (X_student @ X_student.T))
+    M = W_teacher.shape[1]
+    y_teacher = compute_full_predictions(W_teacher, X_teacher, F, M)
+    y_student = compute_full_predictions(W_student, X_student, F, M)
+    inner = (y_teacher * y_student).sum()
+    teacher_norm_sq = (y_teacher**2).sum()
+    student_norm_sq = (y_student**2).sum()
     denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
     return float((inner / denom).item())
 
@@ -234,7 +233,7 @@ def prepare_global_shared_data(
     X_teacher = torch.randn(M, N, device=device, dtype=torch.float32)
 
     torch.manual_seed(seed + 500)
-    F = torch.randn(N, N, device=device, dtype=torch.float32)
+    F = torch.randn(N, N, M, device=device, dtype=torch.float32)
 
     torch.manual_seed(seed + 1000)
     noise_full = torch.randn((N, N), device=device, dtype=torch.float32)
@@ -288,7 +287,6 @@ def prepare_shared_alpha_data(
             "Y_train": torch.empty(0, dtype=torch.float32, device=device),
         }
 
-    FW_teacher = compute_fw(F, W_teacher)
     Y_clean = compute_predictions(
         W_teacher,
         X_teacher,
@@ -297,7 +295,6 @@ def prepare_shared_alpha_data(
         j_idx,
         M,
         lambda_=lambda_,
-        FW=FW_teacher,
     )
     Y_train = Y_clean + noise_full[i_idx.long(), j_idx.long()]
 
@@ -553,7 +550,7 @@ def detect_device() -> torch.device:
 if __name__ == "__main__":
     print("=" * 60)
     print("Alternating Mini-Batch SGD - F-random Matrix Factorization")
-    print("Observation: Y = lambda/(N*sqrt(M)) * F W X + noise")
+    print("Observation: Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise")
     print("=" * 60)
 
     device = detect_device()
@@ -565,7 +562,7 @@ if __name__ == "__main__":
         print("Using: CPU")
 
     print(f"Matrix: N={N}, M={M}")
-    print(f"F: {N}×{N}, lambda={LAMBDA}")
+    print(f"F: {N}×{N}×{M}, lambda={LAMBDA}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
     print(f"Steps: {MAX_STEPS}, Batch={BATCH_SIZE}")
     print(f"LR schedule: {LR_SCHEDULE}")
@@ -596,8 +593,10 @@ if __name__ == "__main__":
         "N": N,
         "M": M,
         "lambda": LAMBDA,
-        "observation_model": "Y = lambda/(N*sqrt(M)) * F W X + noise",
-        "F_shape": [N, N],
+        "observation_model": (
+            "Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise"
+        ),
+        "F_shape": [N, N, M],
         "F_distribution": "standard_normal",
         "alpha_start": ALPHA_START,
         "alpha_stop": ALPHA_STOP,
@@ -621,7 +620,7 @@ if __name__ == "__main__":
         "save_every_replicas": SAVE_EVERY_REPLICAS,
         "early_stop_metric": "abs_delta_loss_per_edge",
         "device": str(device),
-        "evaluation_metric": "cosine_similarity_in_FWX_Y_space",
+        "evaluation_metric": "cosine_similarity_in_full_Y_space",
         "sampling": "with_replacement",
         "shared_teacher_F_noise_global": True,
         "shared_per_alpha_graph_noise": True,
@@ -809,7 +808,7 @@ if __name__ == "__main__":
         elinewidth=1.5,
     )
     ax.set_xlabel(r"$\alpha$ (observation density)", fontsize=14)
-    ax.set_ylabel("Cosine Similarity in F W X Y-space", fontsize=14)
+    ax.set_ylabel("Cosine Similarity in full Y-space", fontsize=14)
     ax.set_title(
         f"Phase Transition (Mini-Batch SGD, F-random)\n"
         f"(N={N}, M={M}, lambda={LAMBDA}, {MAX_STEPS} steps, "
