@@ -55,10 +55,87 @@ NUM_REPLICAS = 5
 CONVERGENCE_THRESHOLD = 1e-5
 LOSS_EVAL_INTERVAL = 100
 SAVE_EVERY_REPLICAS = 5
+DEFAULT_F_DTYPE = "float32"
+DEFAULT_F_STORAGE_DEVICE = "same"
+DEFAULT_PREDICTION_CHUNK_SIZE = 65536
+DEFAULT_COSINE_ROW_CHUNK_SIZE = 16
 
 
 def observation_scale(M: int, lambda_: float) -> float:
     return float(lambda_ / math.sqrt(M))
+
+
+def resolve_f_dtype(f_dtype: str | torch.dtype) -> torch.dtype:
+    if isinstance(f_dtype, torch.dtype):
+        return f_dtype
+
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    try:
+        return dtype_map[f_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported F dtype: {f_dtype}") from exc
+
+
+def resolve_f_storage_device(
+    f_storage_device: str | torch.device | None,
+    compute_device: torch.device,
+) -> torch.device:
+    if f_storage_device is None:
+        return compute_device
+    if isinstance(f_storage_device, torch.device):
+        return f_storage_device
+    if f_storage_device == "same":
+        return compute_device
+    return torch.device(f_storage_device)
+
+
+def _resolve_prediction_chunk_size(
+    num_items: int,
+    chunk_size: int | None,
+) -> int:
+    if num_items <= 0:
+        return 1
+    if chunk_size is None or chunk_size <= 0:
+        return min(num_items, DEFAULT_PREDICTION_CHUNK_SIZE)
+    return min(num_items, int(chunk_size))
+
+
+def _resolve_row_chunk_size(
+    num_rows: int,
+    row_chunk_size: int | None,
+) -> int:
+    if num_rows <= 0:
+        return 1
+    if row_chunk_size is None or row_chunk_size <= 0:
+        return min(num_rows, DEFAULT_COSINE_ROW_CHUNK_SIZE)
+    return min(num_rows, int(row_chunk_size))
+
+
+def _move_to_device_dtype(
+    tensor: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if tensor.device == device and tensor.dtype == dtype:
+        return tensor
+    return tensor.to(device=device, dtype=dtype, non_blocking=True)
+
+
+def _gather_f_entries(
+    F: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    i_storage = i_idx.to(device=F.device, dtype=torch.long, non_blocking=True)
+    j_storage = j_idx.to(device=F.device, dtype=torch.long, non_blocking=True)
+    f_sel = F[i_storage, j_storage, :]
+    return _move_to_device_dtype(f_sel, device, dtype)
 
 
 def compute_full_predictions(
@@ -67,12 +144,32 @@ def compute_full_predictions(
     F: torch.Tensor,
     M: int,
     lambda_: float = LAMBDA,
+    row_chunk_size: int | None = None,
 ) -> torch.Tensor:
     """
     Compute predictions for every (i, j):
         Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j.
     """
-    return observation_scale(M, lambda_) * torch.einsum("ijm,im,mj->ij", F, W, X)
+    N = W.shape[0]
+    chunk_rows = _resolve_row_chunk_size(N, row_chunk_size)
+    scale = observation_scale(M, lambda_)
+    predictions = torch.empty((N, X.shape[1]), device=W.device, dtype=W.dtype)
+
+    for row_start in range(0, N, chunk_rows):
+        row_end = min(row_start + chunk_rows, N)
+        f_block = _move_to_device_dtype(
+            F[row_start:row_end],
+            W.device,
+            W.dtype,
+        )
+        predictions[row_start:row_end] = scale * torch.einsum(
+            "ijm,im,mj->ij",
+            f_block,
+            W[row_start:row_end],
+            X,
+        )
+
+    return predictions
 
 
 def compute_predictions(
@@ -83,16 +180,31 @@ def compute_predictions(
     j_idx: torch.Tensor,
     M: int,
     lambda_: float = LAMBDA,
+    chunk_size: int | None = None,
 ) -> torch.Tensor:
     """
     Compute observed predictions from lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j.
     """
-    i_long = i_idx.long()
-    j_long = j_idx.long()
-    f_sel = F[i_long, j_long, :]
-    w_sel = W[i_long, :]
-    x_sel = X[:, j_long].T
-    return observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
+    num_observed = int(i_idx.numel())
+    if num_observed == 0:
+        return torch.empty(0, dtype=W.dtype, device=W.device)
+
+    chunk = _resolve_prediction_chunk_size(num_observed, chunk_size)
+    scale = observation_scale(M, lambda_)
+    predictions = torch.empty(num_observed, dtype=W.dtype, device=W.device)
+
+    for start in range(0, num_observed, chunk):
+        end = min(start + chunk, num_observed)
+        i_chunk = i_idx[start:end].long()
+        j_chunk = j_idx[start:end].long()
+        i_compute = i_chunk.to(device=W.device, dtype=torch.long, non_blocking=True)
+        j_compute = j_chunk.to(device=W.device, dtype=torch.long, non_blocking=True)
+        f_sel = _gather_f_entries(F, i_chunk, j_chunk, W.device, W.dtype)
+        w_sel = W[i_compute, :]
+        x_sel = X[:, j_compute].T
+        predictions[start:end] = scale * (f_sel * w_sel * x_sel).sum(dim=1)
+
+    return predictions
 
 
 def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
@@ -147,18 +259,24 @@ def sgd_step_W(
     _, M = W.shape
     batch_i = i_idx[batch_positions].long()
     batch_j = j_idx[batch_positions].long()
+    batch_i_compute = batch_i.to(device=W.device, dtype=torch.long, non_blocking=True)
+    batch_j_compute = batch_j.to(device=W.device, dtype=torch.long, non_blocking=True)
     batch_y = Y[batch_positions]
 
-    f_sel = F[batch_i, batch_j, :]
-    w_sel = W[batch_i, :]
-    x_sel = X[:, batch_j].T
+    f_sel = _gather_f_entries(F, batch_i, batch_j, W.device, W.dtype)
+    w_sel = W[batch_i_compute, :]
+    x_sel = X[:, batch_j_compute].T
     y_pred = observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
     residual = y_pred - batch_y
 
     coeff = 2.0 * M * observation_scale(M, lambda_)
     grad_contrib = coeff * residual.unsqueeze(1) * f_sel * x_sel
     grad_W = torch.zeros_like(W)
-    grad_W.scatter_add_(0, batch_i.unsqueeze(1).expand(-1, M), grad_contrib)
+    grad_W.scatter_add_(
+        0,
+        batch_i_compute.unsqueeze(1).expand(-1, M),
+        grad_contrib,
+    )
     return W - lr * grad_W
 
 
@@ -179,18 +297,23 @@ def sgd_step_X(
     M, _ = X.shape
     batch_i = i_idx[batch_positions].long()
     batch_j = j_idx[batch_positions].long()
+    batch_j_compute = batch_j.to(device=X.device, dtype=torch.long, non_blocking=True)
     batch_y = Y[batch_positions]
 
-    f_sel = F[batch_i, batch_j, :]
-    w_sel = W[batch_i, :]
-    x_sel = X[:, batch_j].T
+    f_sel = _gather_f_entries(F, batch_i, batch_j, X.device, X.dtype)
+    w_sel = W[batch_i.to(device=W.device, dtype=torch.long, non_blocking=True), :]
+    x_sel = X[:, batch_j_compute].T
     y_pred = observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
     residual = y_pred - batch_y
 
     coeff = 2.0 * M * observation_scale(M, lambda_)
     grad_contrib = coeff * residual.unsqueeze(1) * f_sel * w_sel
     grad_X = torch.zeros_like(X)
-    grad_X.scatter_add_(1, batch_j.unsqueeze(0).expand(M, -1), grad_contrib.T)
+    grad_X.scatter_add_(
+        1,
+        batch_j_compute.unsqueeze(0).expand(M, -1),
+        grad_contrib.T,
+    )
     return X - lr * grad_X
 
 
@@ -207,16 +330,40 @@ def compute_y_cosine_similarity(
     W_teacher: torch.Tensor,
     X_teacher: torch.Tensor,
     F: torch.Tensor,
+    row_chunk_size: int | None = None,
 ) -> float:
     """
     Cosine similarity over the full N x N Y-space.
     """
-    M = W_teacher.shape[1]
-    y_teacher = compute_full_predictions(W_teacher, X_teacher, F, M)
-    y_student = compute_full_predictions(W_student, X_student, F, M)
-    inner = (y_teacher * y_student).sum()
-    teacher_norm_sq = (y_teacher**2).sum()
-    student_norm_sq = (y_student**2).sum()
+    N, M = W_teacher.shape
+    chunk_rows = _resolve_row_chunk_size(N, row_chunk_size)
+    inner = torch.zeros((), dtype=W_teacher.dtype, device=W_teacher.device)
+    teacher_norm_sq = torch.zeros_like(inner)
+    student_norm_sq = torch.zeros_like(inner)
+
+    for row_start in range(0, N, chunk_rows):
+        row_end = min(row_start + chunk_rows, N)
+        f_block = _move_to_device_dtype(
+            F[row_start:row_end],
+            W_teacher.device,
+            W_teacher.dtype,
+        )
+        y_teacher_block = torch.einsum(
+            "ijm,im,mj->ij",
+            f_block,
+            W_teacher[row_start:row_end],
+            X_teacher,
+        )
+        y_student_block = torch.einsum(
+            "ijm,im,mj->ij",
+            f_block,
+            W_student[row_start:row_end],
+            X_student,
+        )
+        inner = inner + (y_teacher_block * y_student_block).sum()
+        teacher_norm_sq = teacher_norm_sq + (y_teacher_block**2).sum()
+        student_norm_sq = student_norm_sq + (y_student_block**2).sum()
+
     denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
     return float((inner / denom).item())
 
@@ -227,13 +374,17 @@ def prepare_global_shared_data(
     N: int = N,
     M: int = M,
     noise_var: float = NOISE_VAR,
+    f_storage_device: str | torch.device | None = None,
+    f_dtype: str | torch.dtype = DEFAULT_F_DTYPE,
 ) -> dict[str, torch.Tensor | float | int]:
     torch.manual_seed(seed)
     W_teacher = torch.randn(N, M, device=device, dtype=torch.float32)
     X_teacher = torch.randn(M, N, device=device, dtype=torch.float32)
 
     torch.manual_seed(seed + 500)
-    F = torch.randn(N, N, M, device=device, dtype=torch.float32)
+    f_device = resolve_f_storage_device(f_storage_device, device)
+    f_torch_dtype = resolve_f_dtype(f_dtype)
+    F = torch.randn(N, N, M, device=f_device, dtype=f_torch_dtype)
 
     torch.manual_seed(seed + 1000)
     noise_full = torch.randn((N, N), device=device, dtype=torch.float32)
@@ -244,6 +395,8 @@ def prepare_global_shared_data(
         "W_teacher": W_teacher,
         "X_teacher": X_teacher,
         "F": F,
+        "F_storage_device": str(f_device),
+        "F_dtype": str(f_torch_dtype).replace("torch.", ""),
         "noise_full": noise_full,
     }
 
@@ -256,6 +409,7 @@ def prepare_shared_alpha_data(
     M: int = M,
     noise_var: float = NOISE_VAR,
     lambda_: float = LAMBDA,
+    prediction_chunk_size: int | None = None,
     global_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> dict[str, torch.Tensor | float | int]:
     if global_data is None:
@@ -265,6 +419,8 @@ def prepare_shared_alpha_data(
             N=N,
             M=M,
             noise_var=noise_var,
+            f_storage_device=DEFAULT_F_STORAGE_DEVICE,
+            f_dtype=DEFAULT_F_DTYPE,
         )
 
     graph = RandomGraph()
@@ -295,6 +451,7 @@ def prepare_shared_alpha_data(
         j_idx,
         M,
         lambda_=lambda_,
+        chunk_size=prediction_chunk_size,
     )
     Y_train = Y_clean + noise_full[i_idx.long(), j_idx.long()]
 
@@ -324,6 +481,10 @@ def train_single_replica(
     lambda_: float = LAMBDA,
     convergence_threshold: float = CONVERGENCE_THRESHOLD,
     loss_eval_interval: int = LOSS_EVAL_INTERVAL,
+    f_storage_device: str | torch.device | None = None,
+    f_dtype: str | torch.dtype = DEFAULT_F_DTYPE,
+    prediction_chunk_size: int | None = None,
+    cosine_row_chunk_size: int | None = None,
     shared_data: dict[str, torch.Tensor | float | int] | None = None,
 ) -> tuple[float, float, int]:
     if shared_data is None:
@@ -333,6 +494,8 @@ def train_single_replica(
             N=N,
             M=M,
             noise_var=noise_var,
+            f_storage_device=f_storage_device,
+            f_dtype=f_dtype,
         )
         shared_data = prepare_shared_alpha_data(
             alpha=alpha,
@@ -342,6 +505,7 @@ def train_single_replica(
             M=M,
             noise_var=noise_var,
             lambda_=lambda_,
+            prediction_chunk_size=prediction_chunk_size,
             global_data=global_data,
         )
 
@@ -406,6 +570,7 @@ def train_single_replica(
                 j_idx,
                 M,
                 lambda_=lambda_,
+                chunk_size=prediction_chunk_size,
             )
             loss = float(compute_loss(Y_train, Y_pred_full, M).item())
             final_loss = loss
@@ -421,6 +586,7 @@ def train_single_replica(
         W_teacher,
         X_teacher,
         F,
+        row_chunk_size=cosine_row_chunk_size,
     )
     return cosine_similarity, final_loss, steps_taken
 

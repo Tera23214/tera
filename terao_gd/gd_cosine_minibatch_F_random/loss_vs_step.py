@@ -30,6 +30,10 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gd.gd_cosine_minibatch_F_random.gd import (
+    DEFAULT_COSINE_ROW_CHUNK_SIZE,
+    DEFAULT_F_DTYPE,
+    DEFAULT_F_STORAGE_DEVICE,
+    DEFAULT_PREDICTION_CHUNK_SIZE,
     LAMBDA,
     compute_loss,
     compute_predictions,
@@ -65,6 +69,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-replicas", type=int, default=1)
     parser.add_argument("--convergence-threshold", type=float, default=1e-5)
     parser.add_argument("--record-interval", type=int, default=100)
+    parser.add_argument(
+        "--f-dtype",
+        type=str,
+        choices=["float32", "float16", "bfloat16"],
+        default=DEFAULT_F_DTYPE,
+        help="Storage dtype for the shared F tensor.",
+    )
+    parser.add_argument(
+        "--f-storage-device",
+        type=str,
+        choices=["same", "cpu"],
+        default=DEFAULT_F_STORAGE_DEVICE,
+        help="Where to store the shared F tensor.",
+    )
+    parser.add_argument(
+        "--prediction-chunk-size",
+        type=int,
+        default=DEFAULT_PREDICTION_CHUNK_SIZE,
+        help="Chunk size for observed-edge prediction passes.",
+    )
+    parser.add_argument(
+        "--cosine-row-chunk-size",
+        type=int,
+        default=DEFAULT_COSINE_ROW_CHUNK_SIZE,
+        help="Row chunk size for full Y-space cosine similarity evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -130,6 +160,10 @@ def save_config(
         "convergence_threshold": args.convergence_threshold,
         "record_interval": args.record_interval,
         "device": str(device),
+        "F_dtype": args.f_dtype,
+        "F_storage_device": args.f_storage_device,
+        "prediction_chunk_size": args.prediction_chunk_size,
+        "cosine_row_chunk_size": args.cosine_row_chunk_size,
         "student_init": "standard_normal_scaled_0.01",
         "evaluation_metric": "cosine_similarity_in_full_Y_space",
         "sampling": "with_replacement",
@@ -322,6 +356,8 @@ def run_single_replica_with_history(
     batch_size: int,
     lambda_: float,
     record_interval: int,
+    prediction_chunk_size: int,
+    cosine_row_chunk_size: int,
 ) -> tuple[float, dict[str, list[float]]]:
     i_idx = shared_data["i_idx"]
     j_idx = shared_data["j_idx"]
@@ -341,13 +377,29 @@ def run_single_replica_with_history(
     history_cosine_similarities: list[float] = []
 
     def record(step: int) -> None:
-        y_pred = compute_predictions(w_hat, x_hat, F, i_idx, j_idx, M, lambda_=lambda_)
+        y_pred = compute_predictions(
+            w_hat,
+            x_hat,
+            F,
+            i_idx,
+            j_idx,
+            M,
+            lambda_=lambda_,
+            chunk_size=prediction_chunk_size,
+        )
         residual = y_train - y_pred
         history_steps.append(step)
         history_losses.append(float(compute_loss(y_train, y_pred, M).item()))
         history_mses.append(float((residual**2).mean().item()))
         history_cosine_similarities.append(
-            compute_y_cosine_similarity(w_hat, x_hat, w_teacher, x_teacher, F)
+            compute_y_cosine_similarity(
+                w_hat,
+                x_hat,
+                w_teacher,
+                x_teacher,
+                F,
+                row_chunk_size=cosine_row_chunk_size,
+            )
         )
 
     record(0)
@@ -388,6 +440,7 @@ def run_single_replica_with_history(
         w_teacher,
         x_teacher,
         F,
+        row_chunk_size=cosine_row_chunk_size,
     )
     history = {
         "steps": history_steps,
@@ -415,6 +468,11 @@ def main() -> None:
         f"record_interval={args.record_interval}"
     )
     print(f"replicas={args.num_replicas}, seed={args.seed}")
+    print(
+        f"F storage={args.f_storage_device}, F dtype={args.f_dtype}, "
+        f"prediction_chunk_size={args.prediction_chunk_size}, "
+        f"cosine_row_chunk_size={args.cosine_row_chunk_size}"
+    )
     print()
 
     global_data = prepare_global_shared_data(
@@ -423,6 +481,8 @@ def main() -> None:
         N=args.N,
         M=args.M,
         noise_var=args.noise_var,
+        f_storage_device=args.f_storage_device,
+        f_dtype=args.f_dtype,
     )
     shared_data = prepare_shared_alpha_data(
         alpha=args.alpha,
@@ -432,6 +492,7 @@ def main() -> None:
         M=args.M,
         noise_var=args.noise_var,
         lambda_=args.lambda_,
+        prediction_chunk_size=args.prediction_chunk_size,
         global_data=global_data,
     )
     num_observed = int(shared_data["num_observed"])
@@ -473,6 +534,8 @@ def main() -> None:
             batch_size=args.batch_size,
             lambda_=args.lambda_,
             record_interval=args.record_interval,
+            prediction_chunk_size=args.prediction_chunk_size,
+            cosine_row_chunk_size=args.cosine_row_chunk_size,
         )
 
         runtime = time.time() - replica_start
