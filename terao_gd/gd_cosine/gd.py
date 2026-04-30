@@ -36,12 +36,12 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 1000   # Number of rows
-N2 = 1000   # Number of columns  
-M = 100     # Rank (hidden dimension)
+N1 =  200   # Number of rows
+N2 = 200   # Number of columns  
+M = 50     # Rank (hidden dimension)
 
-ALPHA_START = 1.2
-ALPHA_STOP = 2.8
+ALPHA_START = 0
+ALPHA_STOP = 4
 ALPHA_STEP = 0.2
 
 MAX_STEPS = 100000

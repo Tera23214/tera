@@ -81,6 +81,7 @@ def _compute_output_channel_terms(
     noise_var: float,
     damping: float,
     M: int,
+    F_full: torch.Tensor | None = None,
 ) -> tuple[
     float,
     float,
@@ -94,16 +95,44 @@ def _compute_output_channel_terms(
     """
     scale = lam / math.sqrt(M)
     scale_sq = (lam ** 2) / M
+    F_sq = None if F_full is None else F_full ** 2
 
     var_term_W = torch.clamp(v_W - m_W ** 2, min=0.0)
     var_term_X = torch.clamp(v_X - m_X ** 2, min=0.0)
 
-    omega_main = scale * (m_W @ m_X)
-    onsager_W_side = scale_sq * ((m_W * m_W_prev) @ var_term_X)
-    onsager_X_side = scale_sq * (var_term_W @ (m_X * m_X_prev))
+    if F_full is None:
+        omega_main = scale * (m_W @ m_X)
+        onsager_W_side = scale_sq * ((m_W * m_W_prev) @ var_term_X)
+        onsager_X_side = scale_sq * (var_term_W @ (m_X * m_X_prev))
+        V = scale_sq * (v_W @ v_X - (m_W ** 2) @ (m_X ** 2))
+    else:
+        omega_main = scale * torch.einsum("im,ijm,mj->ij", m_W, F_full, m_X)
+        onsager_W_side = scale_sq * torch.einsum(
+            "ijm,im,mj->ij",
+            F_sq,
+            m_W * m_W_prev,
+            var_term_X,
+        )
+        onsager_X_side = scale_sq * torch.einsum(
+            "ijm,im,mj->ij",
+            F_sq,
+            var_term_W,
+            m_X * m_X_prev,
+        )
+        V = scale_sq * torch.einsum(
+            "ijm,im,mj->ij",
+            F_sq,
+            v_W,
+            v_X,
+        )
+        V = V - scale_sq * torch.einsum(
+            "ijm,im,mj->ij",
+            F_sq,
+            m_W ** 2,
+            m_X ** 2,
+        )
     omega = omega_main - g_prev_dense * (onsager_W_side + onsager_X_side)
 
-    V = scale_sq * (v_W @ v_X - (m_W ** 2) @ (m_X ** 2))
     V = torch.clamp(V, min=1e-10)
 
     denom = V + noise_var
@@ -114,8 +143,12 @@ def _compute_output_channel_terms(
     g_dense = mask * torch.clamp(g_dense, min=-100.0, max=100.0)
 
     g_pair = mask * g_dense * g_prev_dense
-    onsager_W = scale_sq * (g_pair @ var_term_X.T)
-    onsager_X = scale_sq * (var_term_W.T @ g_pair)
+    if F_full is None:
+        onsager_W = scale_sq * (g_pair @ var_term_X.T)
+        onsager_X = scale_sq * (var_term_W.T @ g_pair)
+    else:
+        onsager_W = scale_sq * torch.einsum("ij,ijm,mj->im", g_pair, F_sq, var_term_X)
+        onsager_X = scale_sq * torch.einsum("ij,ijm,im->mj", g_pair, F_sq, var_term_W)
 
     return scale, scale_sq, dg, g_dense, onsager_W, onsager_X
 
@@ -134,6 +167,7 @@ def alternating_half_step_W(
     noise_var: float,
     damping: float,
     M: int,
+    F_full: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Update W while freezing X.
@@ -152,11 +186,21 @@ def alternating_half_step_W(
         noise_var=noise_var,
         damping=damping,
         M=M,
+        F_full=F_full,
     )
 
-    Sigma_W_denom = scale_sq * ((-dg) @ (m_X ** 2).T)
+    if F_full is None:
+        Sigma_W_denom = scale_sq * ((-dg) @ (m_X ** 2).T)
+        sum_W = scale * (g_dense @ m_X.T)
+    else:
+        Sigma_W_denom = scale_sq * torch.einsum(
+            "ij,ijm,mj->im",
+            -dg,
+            F_full ** 2,
+            m_X ** 2,
+        )
+        sum_W = scale * torch.einsum("ij,ijm,mj->im", g_dense, F_full, m_X)
     Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
-    sum_W = scale * (g_dense @ m_X.T)
     T_W = m_W + Sigma_W * (sum_W - onsager_W * m_W_prev)
 
     m_W_new, v_W_new = f_input(Sigma_W, T_W)
@@ -182,6 +226,7 @@ def alternating_half_step_X(
     noise_var: float,
     damping: float,
     M: int,
+    F_full: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Update X while freezing W.
@@ -200,11 +245,21 @@ def alternating_half_step_X(
         noise_var=noise_var,
         damping=damping,
         M=M,
+        F_full=F_full,
     )
 
-    Sigma_X_denom = scale_sq * ((m_W ** 2).T @ (-dg))
+    if F_full is None:
+        Sigma_X_denom = scale_sq * ((m_W ** 2).T @ (-dg))
+        sum_X = scale * (m_W.T @ g_dense)
+    else:
+        Sigma_X_denom = scale_sq * torch.einsum(
+            "ij,ijm,im->mj",
+            -dg,
+            F_full ** 2,
+            m_W ** 2,
+        )
+        sum_X = scale * torch.einsum("ij,ijm,im->mj", g_dense, F_full, m_W)
     Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
-    sum_X = scale * (m_W.T @ g_dense)
     T_X = m_X + Sigma_X * (sum_X - onsager_X * m_X_prev)
 
     m_X_new, v_X_new = f_input(Sigma_X, T_X)
@@ -222,14 +277,43 @@ def compute_observed_loss(
     Y_obs_full: torch.Tensor,
     mask: torch.Tensor,
     scale: float,
+    F_full: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Compute MSE on observed entries using the dense observation mask.
     """
     num_observed = mask.sum().clamp_min(1.0)
-    Y_pred = scale * (m_W @ m_X)
+    if F_full is None:
+        Y_pred = scale * (m_W @ m_X)
+    else:
+        Y_pred = scale * torch.einsum("im,ijm,mj->ij", m_W, F_full, m_X)
 
     return (mask * (Y_obs_full - Y_pred) ** 2).sum() / num_observed
+
+
+def compute_observed_signal_cosine_tensor(
+    W_student: torch.Tensor,
+    X_student: torch.Tensor,
+    Y_clean_full: torch.Tensor,
+    mask: torch.Tensor,
+    scale: float,
+    F_full: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute cosine similarity in the observed F-weighted signal space.
+    """
+    Y_student = mask * scale * torch.einsum(
+        "im,ijm,mj->ij",
+        W_student,
+        F_full,
+        X_student,
+    )
+    inner = torch.sum(Y_clean_full * Y_student)
+    teacher_norm_sq = torch.sum(Y_clean_full ** 2)
+    student_norm_sq = torch.sum(Y_student ** 2)
+    denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
+
+    return inner / denom
 
 
 def compute_step_damping(
@@ -258,7 +342,8 @@ def prepare_global_shared_data(
     M: int = 10,
     noise_var: float = 1e-10,
     lam: float = 1.0,
-) -> dict[str, torch.Tensor | float | int]:
+    f_mode: str = "ones",
+) -> dict[str, torch.Tensor | float | int | str]:
     """
     Prepare teacher matrices and a full-grid noise field once for the
     whole simulation.
@@ -278,9 +363,18 @@ def prepare_global_shared_data(
     noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
     noise_full = noise_full * math.sqrt(noise_var)
 
-    return {
+    if f_mode not in {"ones", "random"}:
+        raise ValueError(f"f_mode must be 'ones' or 'random', got {f_mode!r}.")
+
+    F_full = None
+    if f_mode == "random":
+        torch.manual_seed(seed + 1000)
+        F_full = torch.randn((N1, N2, M), device=device, dtype=torch.float32)
+
+    shared_global: dict[str, torch.Tensor | float | int | str] = {
         "seed": seed,
         "scale": scale,
+        "f_mode": f_mode,
         "W_teacher": W_teacher,
         "X_teacher": X_teacher,
         "teacher_w_t": teacher_w_t,
@@ -288,6 +382,10 @@ def prepare_global_shared_data(
         "teacher_norm_sq": teacher_norm_sq,
         "noise_full": noise_full,
     }
+    if F_full is not None:
+        shared_global["F_full"] = F_full
+
+    return shared_global
 
 
 def build_shared_alpha_data(
@@ -296,9 +394,9 @@ def build_shared_alpha_data(
     i_idx: torch.Tensor,
     j_idx: torch.Tensor,
     E: int,
-    global_data: dict[str, torch.Tensor | float | int],
-    metadata: dict[str, torch.Tensor | float | int] | None = None,
-) -> dict[str, torch.Tensor | float | int]:
+    global_data: dict[str, torch.Tensor | float | int | str],
+    metadata: dict[str, torch.Tensor | float | int | str] | None = None,
+) -> dict[str, torch.Tensor | float | int | str]:
     """
     Assemble the graph-dependent shared data dict from a generated mask.
     """
@@ -313,8 +411,9 @@ def build_shared_alpha_data(
     teacher_x_t = global_data["teacher_x_t"]
     teacher_norm_sq = global_data["teacher_norm_sq"]
     noise_full = global_data["noise_full"]
+    F_full = global_data.get("F_full")
 
-    shared_data: dict[str, torch.Tensor | float | int] = {
+    shared_data: dict[str, torch.Tensor | float | int | str] = {
         "alpha": alpha,
         "E": E,
         "scale": scale,
@@ -335,8 +434,19 @@ def build_shared_alpha_data(
     if E == 0:
         return shared_data
 
-    y_clean_full = mask * (scale * (W_teacher @ X_teacher))
-    y_noisy_full = mask * (scale * (W_teacher @ X_teacher) + noise_full)
+    if F_full is None:
+        y_signal_full = scale * (W_teacher @ X_teacher)
+    else:
+        y_signal_full = scale * torch.einsum(
+            "im,ijm,mj->ij",
+            W_teacher,
+            F_full,
+            X_teacher,
+        )
+        shared_data["F_full"] = F_full
+
+    y_clean_full = mask * y_signal_full
+    y_noisy_full = mask * (y_signal_full + noise_full)
     shared_data["Y_clean_full"] = y_clean_full
     shared_data["Y_noisy_full"] = y_noisy_full
 
@@ -393,7 +503,7 @@ def train_single_replica_from_shared_data(
     loss_eval_interval: int = 50,
     early_stop: bool = True,
     init_epsilon: float | None = None,
-    shared_data: dict[str, torch.Tensor | float | int] | None = None,
+    shared_data: dict[str, torch.Tensor | float | int | str] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
     Train a single replica using alternating dense-mask G-AMP with prebuilt
@@ -413,6 +523,8 @@ def train_single_replica_from_shared_data(
     teacher_x_t = shared_data["teacher_x_t"]
     teacher_norm_sq = shared_data["teacher_norm_sq"]
     Y_noisy = shared_data["Y_noisy_full"]
+    Y_clean = shared_data["Y_clean_full"]
+    F_full = shared_data.get("F_full")
     scale = float(shared_data["scale"])
     N1, M = W_teacher.shape
     N2 = X_teacher.shape[1]
@@ -460,6 +572,7 @@ def train_single_replica_from_shared_data(
             noise_var=noise_var,
             damping=damping_t,
             M=M,
+            F_full=F_full,
         )
 
         m_W_prev = m_W_before_W
@@ -481,6 +594,7 @@ def train_single_replica_from_shared_data(
             noise_var=noise_var,
             damping=damping_t,
             M=M,
+            F_full=F_full,
         )
 
         m_W_prev = m_W_before_X
@@ -490,17 +604,27 @@ def train_single_replica_from_shared_data(
             m_W_eval = normalize_to_unit_variance(m_W)
             m_X_eval = normalize_to_unit_variance(m_X)
             loss_tensor = compute_observed_loss(
-                m_W_eval, m_X_eval, Y_noisy, mask, scale
+                m_W_eval, m_X_eval, Y_noisy, mask, scale, F_full=F_full
             )
 
             if return_history:
-                cosine_similarity_step = compute_y_cosine_similarity_tensor(
-                    W_student=m_W_eval,
-                    X_student=m_X_eval,
-                    teacher_w_t=teacher_w_t,
-                    teacher_x_t=teacher_x_t,
-                    teacher_norm_sq=teacher_norm_sq,
-                )
+                if F_full is None:
+                    cosine_similarity_step = compute_y_cosine_similarity_tensor(
+                        W_student=m_W_eval,
+                        X_student=m_X_eval,
+                        teacher_w_t=teacher_w_t,
+                        teacher_x_t=teacher_x_t,
+                        teacher_norm_sq=teacher_norm_sq,
+                    )
+                else:
+                    cosine_similarity_step = compute_observed_signal_cosine_tensor(
+                        W_student=m_W_eval,
+                        X_student=m_X_eval,
+                        Y_clean_full=Y_clean,
+                        mask=mask,
+                        scale=scale,
+                        F_full=F_full,
+                    )
                 history["steps"].append(step + 1)
                 history_loss_tensors.append(loss_tensor.detach())
                 history_cosine_values.append(float(cosine_similarity_step.item()))
@@ -523,15 +647,27 @@ def train_single_replica_from_shared_data(
     m_W = normalize_to_unit_variance(m_W)
     m_X = normalize_to_unit_variance(m_X)
 
-    cosine_similarity = float(
-        compute_y_cosine_similarity_tensor(
-            W_student=m_W,
-            X_student=m_X,
-            teacher_w_t=teacher_w_t,
-            teacher_x_t=teacher_x_t,
-            teacher_norm_sq=teacher_norm_sq,
-        ).item()
-    )
+    if F_full is None:
+        cosine_similarity = float(
+            compute_y_cosine_similarity_tensor(
+                W_student=m_W,
+                X_student=m_X,
+                teacher_w_t=teacher_w_t,
+                teacher_x_t=teacher_x_t,
+                teacher_norm_sq=teacher_norm_sq,
+            ).item()
+        )
+    else:
+        cosine_similarity = float(
+            compute_observed_signal_cosine_tensor(
+                W_student=m_W,
+                X_student=m_X,
+                Y_clean_full=Y_clean,
+                mask=mask,
+                scale=scale,
+                F_full=F_full,
+            ).item()
+        )
 
     if return_history:
         if history_loss_tensors:
@@ -549,6 +685,7 @@ __all__ = [
     "alternating_half_step_X",
     "build_shared_alpha_data",
     "compute_observed_loss",
+    "compute_observed_signal_cosine_tensor",
     "compute_step_damping",
     "compute_y_cosine_similarity",
     "compute_y_cosine_similarity_tensor",
