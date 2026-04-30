@@ -1,0 +1,962 @@
+#!/usr/bin/env python
+"""
+Alternating full-batch AGD for the F-random observation model.
+
+Observation model:
+    Y_ij = lambda / sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise
+
+where
+    F: (N, N, M), F_ij,mu ~ N(0, 1)
+    W: (N, M)
+    X: (M, N)
+
+F is generated once, shared with the student perfectly, and never optimized.
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import yaml
+
+repo_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(repo_root))
+
+from terao_gamp_gaussian.graph import RandomGraph
+
+
+N = 200
+M = 50
+LAMBDA = 1.0
+
+ALPHA_START = 0
+ALPHA_STOP = 4.0
+ALPHA_STEP = 0.2
+
+MAX_STEPS = 100000
+LR_BASE = 0.3
+LR = LR_BASE / math.sqrt(N * N * M)
+NOISE_VAR = 0
+SHARED_SEED = 1
+STUDENT_SEED_BASE = 100
+NUM_REPLICAS = 5
+CONVERGENCE_THRESHOLD = 1e-5
+LOSS_EVAL_INTERVAL = 100
+SAVE_EVERY_REPLICAS = 10
+DEFAULT_F_DTYPE = "float32"
+DEFAULT_F_STORAGE_DEVICE = "same"
+DEFAULT_PREDICTION_CHUNK_SIZE = 65536
+DEFAULT_COSINE_ROW_CHUNK_SIZE = 16
+
+
+def observation_scale(M: int, lambda_: float) -> float:
+    return float(lambda_ / math.sqrt(M))
+
+
+def resolve_f_dtype(f_dtype: str | torch.dtype) -> torch.dtype:
+    if isinstance(f_dtype, torch.dtype):
+        return f_dtype
+
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    try:
+        return dtype_map[f_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported F dtype: {f_dtype}") from exc
+
+
+def resolve_f_storage_device(
+    f_storage_device: str | torch.device | None,
+    compute_device: torch.device,
+) -> torch.device:
+    if f_storage_device is None:
+        return compute_device
+    if isinstance(f_storage_device, torch.device):
+        return f_storage_device
+    if f_storage_device == "same":
+        return compute_device
+    return torch.device(f_storage_device)
+
+
+def _resolve_prediction_chunk_size(
+    num_items: int,
+    chunk_size: int | None,
+) -> int:
+    if num_items <= 0:
+        return 1
+    if chunk_size is None or chunk_size <= 0:
+        return min(num_items, DEFAULT_PREDICTION_CHUNK_SIZE)
+    return min(num_items, int(chunk_size))
+
+
+def _resolve_row_chunk_size(
+    num_rows: int,
+    row_chunk_size: int | None,
+) -> int:
+    if num_rows <= 0:
+        return 1
+    if row_chunk_size is None or row_chunk_size <= 0:
+        return min(num_rows, DEFAULT_COSINE_ROW_CHUNK_SIZE)
+    return min(num_rows, int(row_chunk_size))
+
+
+def _move_to_device_dtype(
+    tensor: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if tensor.device == device and tensor.dtype == dtype:
+        return tensor
+    return tensor.to(device=device, dtype=dtype, non_blocking=True)
+
+
+def _gather_f_entries(
+    F: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    i_storage = i_idx.to(device=F.device, dtype=torch.long, non_blocking=True)
+    j_storage = j_idx.to(device=F.device, dtype=torch.long, non_blocking=True)
+    f_sel = F[i_storage, j_storage, :]
+    return _move_to_device_dtype(f_sel, device, dtype)
+
+
+def compute_full_predictions(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    F: torch.Tensor,
+    M: int,
+    lambda_: float = LAMBDA,
+    row_chunk_size: int | None = None,
+) -> torch.Tensor:
+    """
+    Compute predictions for every (i, j):
+        Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j.
+    """
+    N = W.shape[0]
+    chunk_rows = _resolve_row_chunk_size(N, row_chunk_size)
+    scale = observation_scale(M, lambda_)
+    predictions = torch.empty((N, X.shape[1]), device=W.device, dtype=W.dtype)
+
+    for row_start in range(0, N, chunk_rows):
+        row_end = min(row_start + chunk_rows, N)
+        f_block = _move_to_device_dtype(
+            F[row_start:row_end],
+            W.device,
+            W.dtype,
+        )
+        predictions[row_start:row_end] = scale * torch.einsum(
+            "ijm,im,mj->ij",
+            f_block,
+            W[row_start:row_end],
+            X,
+        )
+
+    return predictions
+
+
+def compute_predictions(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    F: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    M: int,
+    lambda_: float = LAMBDA,
+    chunk_size: int | None = None,
+) -> torch.Tensor:
+    """
+    Compute observed predictions from lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j.
+    """
+    num_observed = int(i_idx.numel())
+    if num_observed == 0:
+        return torch.empty(0, dtype=W.dtype, device=W.device)
+
+    chunk = _resolve_prediction_chunk_size(num_observed, chunk_size)
+    scale = observation_scale(M, lambda_)
+    predictions = torch.empty(num_observed, dtype=W.dtype, device=W.device)
+
+    for start in range(0, num_observed, chunk):
+        end = min(start + chunk, num_observed)
+        i_chunk = i_idx[start:end].long()
+        j_chunk = j_idx[start:end].long()
+        i_compute = i_chunk.to(device=W.device, dtype=torch.long, non_blocking=True)
+        j_compute = j_chunk.to(device=W.device, dtype=torch.long, non_blocking=True)
+        f_sel = _gather_f_entries(F, i_chunk, j_chunk, W.device, W.dtype)
+        w_sel = W[i_compute, :]
+        x_sel = X[:, j_compute].T
+        predictions[start:end] = scale * (f_sel * w_sel * x_sel).sum(dim=1)
+
+    return predictions
+
+
+def compute_loss(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torch.Tensor:
+    num_observed = max(Y.numel(), 1)
+    return M * ((Y - Y_pred) ** 2).sum() / num_observed
+
+
+def resolve_lr(alpha: float) -> float:
+    return float(LR)
+
+
+def compute_full_batch_passes(
+    num_observed: int,
+    max_steps: int,
+) -> float:
+    if num_observed <= 0:
+        return 0.0
+    return float(max_steps)
+
+
+def agd_step_W(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    F: torch.Tensor,
+    Y: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    lr: float,
+    lambda_: float = LAMBDA,
+) -> torch.Tensor:
+    """
+    Full-batch gradient step for W.
+    """
+    _, M = W.shape
+    i_idx_long = i_idx.long()
+    j_idx_long = j_idx.long()
+    i_compute = i_idx_long.to(device=W.device, dtype=torch.long, non_blocking=True)
+    j_compute = j_idx_long.to(device=W.device, dtype=torch.long, non_blocking=True)
+
+    f_sel = _gather_f_entries(F, i_idx_long, j_idx_long, W.device, W.dtype)
+    w_sel = W[i_compute, :]
+    x_sel = X[:, j_compute].T
+    y_pred = observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
+    residual = y_pred - Y
+
+    coeff = 2.0 * M * observation_scale(M, lambda_)
+    grad_contrib = coeff * residual.unsqueeze(1) * f_sel * x_sel
+    grad_W = torch.zeros_like(W)
+    grad_W.scatter_add_(
+        0,
+        i_compute.unsqueeze(1).expand(-1, M),
+        grad_contrib,
+    )
+    return W - lr * grad_W
+
+
+def agd_step_X(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    F: torch.Tensor,
+    Y: torch.Tensor,
+    i_idx: torch.Tensor,
+    j_idx: torch.Tensor,
+    lr: float,
+    lambda_: float = LAMBDA,
+) -> torch.Tensor:
+    """
+    Full-batch gradient step for X.
+    """
+    M, _ = X.shape
+    i_idx_long = i_idx.long()
+    j_idx_long = j_idx.long()
+    i_compute = i_idx_long.to(device=W.device, dtype=torch.long, non_blocking=True)
+    j_compute = j_idx_long.to(device=X.device, dtype=torch.long, non_blocking=True)
+
+    f_sel = _gather_f_entries(F, i_idx_long, j_idx_long, X.device, X.dtype)
+    w_sel = W[i_compute, :]
+    x_sel = X[:, j_compute].T
+    y_pred = observation_scale(M, lambda_) * (f_sel * w_sel * x_sel).sum(dim=1)
+    residual = y_pred - Y
+
+    coeff = 2.0 * M * observation_scale(M, lambda_)
+    grad_contrib = coeff * residual.unsqueeze(1) * f_sel * w_sel
+    grad_X = torch.zeros_like(X)
+    grad_X.scatter_add_(
+        1,
+        j_compute.unsqueeze(0).expand(M, -1),
+        grad_contrib.T,
+    )
+    return X - lr * grad_X
+
+
+def normalize_to_unit_variance(tensor: torch.Tensor) -> torch.Tensor:
+    mean_sq = (tensor**2).mean()
+    if mean_sq > 0:
+        return tensor / torch.sqrt(mean_sq)
+    return tensor
+
+
+def compute_y_cosine_similarity(
+    W_student: torch.Tensor,
+    X_student: torch.Tensor,
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+    F: torch.Tensor,
+    row_chunk_size: int | None = None,
+) -> float:
+    """
+    Cosine similarity over the full N x N Y-space.
+    """
+    N, M = W_teacher.shape
+    chunk_rows = _resolve_row_chunk_size(N, row_chunk_size)
+    inner = torch.zeros((), dtype=W_teacher.dtype, device=W_teacher.device)
+    teacher_norm_sq = torch.zeros_like(inner)
+    student_norm_sq = torch.zeros_like(inner)
+
+    for row_start in range(0, N, chunk_rows):
+        row_end = min(row_start + chunk_rows, N)
+        f_block = _move_to_device_dtype(
+            F[row_start:row_end],
+            W_teacher.device,
+            W_teacher.dtype,
+        )
+        y_teacher_block = torch.einsum(
+            "ijm,im,mj->ij",
+            f_block,
+            W_teacher[row_start:row_end],
+            X_teacher,
+        )
+        y_student_block = torch.einsum(
+            "ijm,im,mj->ij",
+            f_block,
+            W_student[row_start:row_end],
+            X_student,
+        )
+        inner = inner + (y_teacher_block * y_student_block).sum()
+        teacher_norm_sq = teacher_norm_sq + (y_teacher_block**2).sum()
+        student_norm_sq = student_norm_sq + (y_student_block**2).sum()
+
+    denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
+    return float((inner / denom).item())
+
+
+def prepare_global_shared_data(
+    device: torch.device,
+    seed: int = SHARED_SEED,
+    N: int = N,
+    M: int = M,
+    noise_var: float = NOISE_VAR,
+    f_storage_device: str | torch.device | None = None,
+    f_dtype: str | torch.dtype = DEFAULT_F_DTYPE,
+) -> dict[str, torch.Tensor | float | int]:
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N, M, device=device, dtype=torch.float32)
+    X_teacher = torch.randn(M, N, device=device, dtype=torch.float32)
+
+    torch.manual_seed(seed + 500)
+    f_device = resolve_f_storage_device(f_storage_device, device)
+    f_torch_dtype = resolve_f_dtype(f_dtype)
+    F = torch.randn(N, N, M, device=f_device, dtype=f_torch_dtype)
+
+    torch.manual_seed(seed + 1000)
+    noise_full = torch.randn((N, N), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "F": F,
+        "F_storage_device": str(f_device),
+        "F_dtype": str(f_torch_dtype).replace("torch.", ""),
+        "noise_full": noise_full,
+    }
+
+
+def prepare_shared_alpha_data(
+    alpha: float,
+    device: torch.device,
+    seed: int = SHARED_SEED,
+    N: int = N,
+    M: int = M,
+    noise_var: float = NOISE_VAR,
+    lambda_: float = LAMBDA,
+    prediction_chunk_size: int | None = None,
+    global_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> dict[str, torch.Tensor | float | int]:
+    if global_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=seed,
+            N=N,
+            M=M,
+            noise_var=noise_var,
+            f_storage_device=DEFAULT_F_STORAGE_DEVICE,
+            f_dtype=DEFAULT_F_DTYPE,
+        )
+
+    graph = RandomGraph()
+    i_idx, j_idx, num_observed = graph.generate(N, N, M, alpha, device, seed)
+    W_teacher = global_data["W_teacher"]
+    X_teacher = global_data["X_teacher"]
+    F = global_data["F"]
+    noise_full = global_data["noise_full"]
+
+    if num_observed == 0:
+        return {
+            "alpha": alpha,
+            "num_observed": 0,
+            "i_idx": i_idx,
+            "j_idx": j_idx,
+            "W_teacher": W_teacher,
+            "X_teacher": X_teacher,
+            "F": F,
+            "Y_clean": torch.empty(0, dtype=torch.float32, device=device),
+            "Y_train": torch.empty(0, dtype=torch.float32, device=device),
+        }
+
+    Y_clean = compute_predictions(
+        W_teacher,
+        X_teacher,
+        F,
+        i_idx,
+        j_idx,
+        M,
+        lambda_=lambda_,
+        chunk_size=prediction_chunk_size,
+    )
+    Y_train = Y_clean + noise_full[i_idx.long(), j_idx.long()]
+
+    return {
+        "alpha": alpha,
+        "num_observed": num_observed,
+        "i_idx": i_idx,
+        "j_idx": j_idx,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "F": F,
+        "Y_clean": Y_clean,
+        "Y_train": Y_train,
+    }
+
+
+def train_single_replica(
+    alpha: float,
+    device: torch.device,
+    seed: int,
+    N: int = N,
+    M: int = M,
+    max_steps: int = MAX_STEPS,
+    lr: float | None = None,
+    noise_var: float = NOISE_VAR,
+    lambda_: float = LAMBDA,
+    convergence_threshold: float = CONVERGENCE_THRESHOLD,
+    loss_eval_interval: int = LOSS_EVAL_INTERVAL,
+    f_storage_device: str | torch.device | None = None,
+    f_dtype: str | torch.dtype = DEFAULT_F_DTYPE,
+    prediction_chunk_size: int | None = None,
+    cosine_row_chunk_size: int | None = None,
+    shared_data: dict[str, torch.Tensor | float | int] | None = None,
+) -> tuple[float, float, int]:
+    if shared_data is None:
+        global_data = prepare_global_shared_data(
+            device=device,
+            seed=SHARED_SEED,
+            N=N,
+            M=M,
+            noise_var=noise_var,
+            f_storage_device=f_storage_device,
+            f_dtype=f_dtype,
+        )
+        shared_data = prepare_shared_alpha_data(
+            alpha=alpha,
+            device=device,
+            seed=SHARED_SEED,
+            N=N,
+            M=M,
+            noise_var=noise_var,
+            lambda_=lambda_,
+            prediction_chunk_size=prediction_chunk_size,
+            global_data=global_data,
+        )
+
+    num_observed = int(shared_data["num_observed"])
+    if num_observed == 0:
+        return 0.0, 0.0, 0
+
+    if lr is None:
+        lr = resolve_lr(alpha)
+
+    i_idx = shared_data["i_idx"]
+    j_idx = shared_data["j_idx"]
+    Y_train = shared_data["Y_train"]
+    W_teacher = shared_data["W_teacher"]
+    X_teacher = shared_data["X_teacher"]
+    F = shared_data["F"]
+    N, M = W_teacher.shape
+
+    torch.manual_seed(seed + 2000)
+    W_hat = torch.randn(N, M, device=device, dtype=torch.float32) * 0.01
+    X_hat = torch.randn(M, N, device=device, dtype=torch.float32) * 0.01
+
+    final_loss = 0.0
+    steps_taken = max_steps
+    prev_loss = float("inf")
+
+    for step in range(max_steps):
+        W_hat = agd_step_W(
+            W_hat,
+            X_hat,
+            F,
+            Y_train,
+            i_idx,
+            j_idx,
+            lr,
+            lambda_=lambda_,
+        )
+        X_hat = agd_step_X(
+            W_hat,
+            X_hat,
+            F,
+            Y_train,
+            i_idx,
+            j_idx,
+            lr,
+            lambda_=lambda_,
+        )
+
+        W_hat = normalize_to_unit_variance(W_hat)
+        X_hat = normalize_to_unit_variance(X_hat)
+
+        if step % loss_eval_interval == 0 or step == max_steps - 1:
+            Y_pred_full = compute_predictions(
+                W_hat,
+                X_hat,
+                F,
+                i_idx,
+                j_idx,
+                M,
+                lambda_=lambda_,
+                chunk_size=prediction_chunk_size,
+            )
+            loss = float(compute_loss(Y_train, Y_pred_full, M).item())
+            final_loss = loss
+
+            if abs(prev_loss - loss) < convergence_threshold:
+                steps_taken = step + 1
+                break
+            prev_loss = loss
+
+    cosine_similarity = compute_y_cosine_similarity(
+        W_hat,
+        X_hat,
+        W_teacher,
+        X_teacher,
+        F,
+        row_chunk_size=cosine_row_chunk_size,
+    )
+    return cosine_similarity, final_loss, steps_taken
+
+
+def save_metrics_csv(
+    results_dir: Path,
+    results: dict[float, dict[str, float | int | list[float] | list[int]]],
+    alphas_list: list[float],
+    num_replicas: int,
+) -> None:
+    csv_path = results_dir / "metrics.csv"
+    lines = []
+    header = (
+        "alpha,lambda,lr,num_observed,full_batch_passes,completed_replicas,"
+        "cosine_similarity_mean,cosine_similarity_std,"
+        "Loss_mean,Loss_std,Steps_mean"
+    )
+    for i in range(num_replicas):
+        header += f",cosine_similarity_replica_{i},loss_replica_{i}"
+    lines.append(header)
+
+    for alpha in alphas_list:
+        r = results[alpha]
+        cosine_similarity_values = list(r["cosine_similarity_values"])
+        loss_values = list(r["loss_values"])
+        completed_replicas = int(r.get("completed_replicas", len(cosine_similarity_values)))
+        line = (
+            f"{alpha},{r['lambda']},{r['lr']},{r['num_observed']},"
+            f"{r['full_batch_passes']},{completed_replicas},"
+            f"{r['cosine_similarity_mean']},{r['cosine_similarity_std']},"
+            f"{r['loss_mean']},{r['loss_std']},{r['steps_mean']}"
+        )
+        for replica_idx in range(num_replicas):
+            if replica_idx < len(cosine_similarity_values):
+                line += f",{cosine_similarity_values[replica_idx]},{loss_values[replica_idx]}"
+            else:
+                line += ",,"
+        lines.append(line)
+
+    write_text_atomic(csv_path, "\n".join(lines) + "\n")
+
+
+def save_replica_summary(
+    results_dir: Path,
+    replica_records: list[dict[str, float | int]],
+) -> None:
+    summary_path = results_dir / "replica_summary.csv"
+    lines = [
+        "alpha,lambda,lr,num_observed,full_batch_passes,replica,seed,runtime_sec,"
+        "final_loss,steps_taken,cosine_similarity"
+    ]
+    for record in replica_records:
+        lines.append(
+            f"{record['alpha']},{record['lambda']},{record['lr']},"
+            f"{record['num_observed']},{record['full_batch_passes']},"
+            f"{record['replica']},{record['seed']},{record['runtime_sec']:.4f},"
+            f"{record['final_loss']:.10e},{record['steps_taken']},"
+            f"{record['cosine_similarity']:.10e}"
+        )
+    write_text_atomic(summary_path, "\n".join(lines) + "\n")
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text)
+    tmp_path.replace(path)
+
+
+def build_alpha_result(
+    lambda_: float,
+    lr_alpha: float,
+    num_observed: int,
+    full_batch_passes: float,
+    cosine_similarity_values: list[float],
+    loss_values: list[float],
+    steps_values: list[int],
+) -> dict[str, float | int | list[float] | list[int]]:
+    return {
+        "lambda": lambda_,
+        "lr": lr_alpha,
+        "num_observed": num_observed,
+        "full_batch_passes": full_batch_passes,
+        "completed_replicas": len(cosine_similarity_values),
+        "cosine_similarity_mean": float(np.mean(cosine_similarity_values)),
+        "cosine_similarity_std": float(np.std(cosine_similarity_values)),
+        "cosine_similarity_values": cosine_similarity_values.copy(),
+        "loss_mean": float(np.mean(loss_values)),
+        "loss_std": float(np.std(loss_values)),
+        "loss_values": loss_values.copy(),
+        "steps_mean": float(np.mean(steps_values)),
+        "steps_values": steps_values.copy(),
+    }
+
+
+def save_progress_outputs(
+    results_dir: Path,
+    results: dict[float, dict[str, float | int | list[float] | list[int]]],
+    replica_records: list[dict[str, float | int]],
+    num_replicas: int,
+    completed: int,
+    total_tasks: int,
+    start_time: float,
+    status: str,
+) -> None:
+    alphas_list = sorted(results.keys())
+    save_metrics_csv(results_dir, results, alphas_list, num_replicas)
+    save_replica_summary(results_dir, replica_records)
+    status_path = results_dir / "progress.yaml"
+    status_data = {
+        "status": status,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "completed_tasks": completed,
+        "total_tasks": total_tasks,
+        "elapsed_sec": time.time() - start_time,
+    }
+    write_text_atomic(status_path, yaml.dump(status_data, default_flow_style=False))
+
+
+def detect_device() -> torch.device:
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Alternating Full-Batch AGD - F-random Matrix Factorization")
+    print("Observation: Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise")
+    print("=" * 60)
+
+    device = detect_device()
+    if device.type == "mps":
+        print("Using: Apple Silicon (MPS)")
+    elif device.type == "cuda":
+        print(f"Using: CUDA ({torch.cuda.get_device_name()})")
+    else:
+        print("Using: CPU")
+
+    print(f"Matrix: N={N}, M={M}")
+    print(f"F: {N}×{N}×{M}, lambda={LAMBDA}")
+    print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
+    print(f"Steps: {MAX_STEPS}, LR={LR:.6e} (LR_BASE / sqrt(N*N*M), LR_BASE={LR_BASE})")
+    print("Each step uses all observed edges.")
+    print(
+        "Early stopping: "
+        f"abs(loss_t - loss_(t-1)) < {CONVERGENCE_THRESHOLD} "
+        f"(checked every {LOSS_EVAL_INTERVAL} step)"
+    )
+    print("Shared across run: teacher / F / full noise field")
+    print("Shared per alpha: graph / observed targets")
+    print("Replica-specific: student initialization only")
+    print(f"Replicas per alpha: {NUM_REPLICAS}")
+    print()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir_name = (
+        f"{timestamp}_agd_F_random_{N}x{M}_lambda{LAMBDA}_"
+        f"alpha{ALPHA_START}-{ALPHA_STOP}"
+    )
+    results_dir = Path(__file__).parent / "results" / results_dir_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results directory: {results_dir}")
+
+    config = {
+        "algorithm": "agd_cosine_F_random",
+        "N": N,
+        "M": M,
+        "lambda": LAMBDA,
+        "observation_model": (
+            "Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise"
+        ),
+        "F_shape": [N, N, M],
+        "F_distribution": "standard_normal",
+        "alpha_start": ALPHA_START,
+        "alpha_stop": ALPHA_STOP,
+        "alpha_step": ALPHA_STEP,
+        "max_steps": MAX_STEPS,
+        "lr_base": LR_BASE,
+        "lr": LR,
+        "lr_formula": "LR_BASE / sqrt(N * N * M)",
+        "full_batch_pass_formula": "max_steps",
+        "noise_var": NOISE_VAR,
+        "teacher_seed": SHARED_SEED,
+        "F_seed": SHARED_SEED + 500,
+        "graph_seed": SHARED_SEED,
+        "noise_seed": SHARED_SEED + 1000,
+        "student_seed_base": STUDENT_SEED_BASE,
+        "num_replicas": NUM_REPLICAS,
+        "convergence_threshold": CONVERGENCE_THRESHOLD,
+        "loss_eval_interval": LOSS_EVAL_INTERVAL,
+        "save_every_replicas": SAVE_EVERY_REPLICAS,
+        "early_stop_metric": "abs_delta_loss_per_edge",
+        "device": str(device),
+        "evaluation_metric": "cosine_similarity_in_full_Y_space",
+        "batching": "full_batch_all_observed_edges",
+        "shared_teacher_F_noise_global": True,
+        "shared_per_alpha_graph_noise": True,
+        "replica_variation": "student_initialization_only",
+    }
+    config_path = results_dir / "config.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+    print(f"Config saved: {config_path}")
+
+    alphas = np.arange(ALPHA_START, ALPHA_STOP + ALPHA_STEP / 2, ALPHA_STEP)
+    results: dict[float, dict[str, float | int | list[float] | list[int]]] = {}
+
+    start_time = time.time()
+    total_tasks = len(alphas) * NUM_REPLICAS
+    completed = 0
+    replica_records: list[dict[str, float | int]] = []
+    global_data = prepare_global_shared_data(
+        device=device,
+        seed=SHARED_SEED,
+        N=N,
+        M=M,
+        noise_var=NOISE_VAR,
+    )
+
+    interrupted = False
+    try:
+        for alpha in alphas:
+            alpha_key = float(alpha)
+            shared_data = prepare_shared_alpha_data(
+                alpha=alpha_key,
+                device=device,
+                seed=SHARED_SEED,
+                N=N,
+                M=M,
+                noise_var=NOISE_VAR,
+                lambda_=LAMBDA,
+                global_data=global_data,
+            )
+            num_observed = int(shared_data["num_observed"])
+            lr_alpha = resolve_lr(alpha_key)
+            full_batch_passes = compute_full_batch_passes(
+                num_observed=num_observed,
+                max_steps=MAX_STEPS,
+            )
+            print(
+                f"alpha={alpha_key:.2f}: E={num_observed}, lr={lr_alpha:.3e}, "
+                f"full_batch_passes={full_batch_passes:.0f}"
+            )
+
+            cosine_similarity_values: list[float] = []
+            loss_values: list[float] = []
+            steps_values: list[int] = []
+
+            for replica_id in range(NUM_REPLICAS):
+                replica_seed = STUDENT_SEED_BASE + replica_id
+                t0 = time.time()
+                cosine_similarity, final_loss, steps_taken = train_single_replica(
+                    alpha=alpha_key,
+                    device=device,
+                    seed=replica_seed,
+                    N=N,
+                    M=M,
+                    max_steps=MAX_STEPS,
+                    lr=lr_alpha,
+                    noise_var=NOISE_VAR,
+                    lambda_=LAMBDA,
+                    convergence_threshold=CONVERGENCE_THRESHOLD,
+                    shared_data=shared_data,
+                )
+                dt = time.time() - t0
+                cosine_similarity_values.append(cosine_similarity)
+                loss_values.append(final_loss)
+                steps_values.append(steps_taken)
+                completed += 1
+                replica_records.append(
+                    {
+                        "alpha": alpha_key,
+                        "lambda": LAMBDA,
+                        "lr": lr_alpha,
+                        "num_observed": num_observed,
+                        "full_batch_passes": full_batch_passes,
+                        "replica": replica_id + 1,
+                        "seed": replica_seed,
+                        "runtime_sec": dt,
+                        "final_loss": final_loss,
+                        "steps_taken": steps_taken,
+                        "cosine_similarity": cosine_similarity,
+                    }
+                )
+                results[alpha_key] = build_alpha_result(
+                    lambda_=LAMBDA,
+                    lr_alpha=lr_alpha,
+                    num_observed=num_observed,
+                    full_batch_passes=full_batch_passes,
+                    cosine_similarity_values=cosine_similarity_values,
+                    loss_values=loss_values,
+                    steps_values=steps_values,
+                )
+                print(
+                    f"alpha={alpha_key:.2f}, replica {replica_id + 1}/{NUM_REPLICAS}: "
+                    f"CosSim={cosine_similarity:.4f}, Loss={final_loss:.2e}, "
+                    f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
+                )
+                if completed % SAVE_EVERY_REPLICAS == 0:
+                    save_progress_outputs(
+                        results_dir=results_dir,
+                        results=results,
+                        replica_records=replica_records,
+                        num_replicas=NUM_REPLICAS,
+                        completed=completed,
+                        total_tasks=total_tasks,
+                        start_time=start_time,
+                        status="running",
+                    )
+                    print(f"Progress saved: {results_dir}")
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupted. Saving partial outputs before exit...")
+        save_progress_outputs(
+            results_dir=results_dir,
+            results=results,
+            replica_records=replica_records,
+            num_replicas=NUM_REPLICAS,
+            completed=completed,
+            total_tasks=total_tasks,
+            start_time=start_time,
+            status="interrupted",
+        )
+
+    total_time = time.time() - start_time
+
+    print("\n" + "=" * 60)
+    print("Results (mean ± std)")
+    print("=" * 60)
+    print(f"{'Alpha':>6} | {'CosSim':^20} | {'Loss':^20} | {'Steps':>8}")
+    print("-" * 60)
+    for alpha in sorted(results.keys()):
+        r = results[alpha]
+        print(
+            f"{alpha:6.2f} | "
+            f"{r['cosine_similarity_mean']:8.4f} ± {r['cosine_similarity_std']:<8.4f} | "
+            f"{r['loss_mean']:8.2e} ± {r['loss_std']:<8.2e} | "
+            f"{r['steps_mean']:8.0f}"
+        )
+
+    print(f"\nTotal time: {total_time:.1f}s")
+    print("=" * 60)
+
+    if not results:
+        print("\nNo completed replicas yet; metrics headers were saved.")
+        print(f"Results saved to: {results_dir}")
+        sys.exit(130 if interrupted else 0)
+
+    alphas_list = sorted(results.keys())
+    cosine_similarity_means = [results[a]["cosine_similarity_mean"] for a in alphas_list]
+    cosine_similarity_stds = [results[a]["cosine_similarity_std"] for a in alphas_list]
+
+    save_progress_outputs(
+        results_dir=results_dir,
+        results=results,
+        replica_records=replica_records,
+        num_replicas=NUM_REPLICAS,
+        completed=completed,
+        total_tasks=total_tasks,
+        start_time=start_time,
+        status="interrupted" if interrupted else "completed",
+    )
+    print(f"Metrics saved: {results_dir / 'metrics.csv'}")
+    print(f"Replica summary saved: {results_dir / 'replica_summary.csv'}")
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.errorbar(
+        alphas_list,
+        cosine_similarity_means,
+        yerr=cosine_similarity_stds,
+        fmt="o-",
+        color="#1E88E5",
+        markersize=6,
+        linewidth=2,
+        capsize=4,
+        capthick=1.5,
+        elinewidth=1.5,
+    )
+    ax.set_xlabel(r"$\alpha$ (observation density)", fontsize=14)
+    ax.set_ylabel("Cosine Similarity in full Y-space", fontsize=14)
+    ax.set_title(
+        f"Phase Transition (Full-Batch AGD, F-random)\n"
+        f"(N={N}, M={M}, lambda={LAMBDA}, {MAX_STEPS} steps, "
+        f"{NUM_REPLICAS} replicas)",
+        fontsize=16,
+    )
+    ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)
+    ax.set_ylim(-0.05, 1.05)
+    ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+    ax.axhline(y=1, color="gray", linestyle="--", alpha=0.5)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plots_dir = results_dir / "plots"
+    plots_dir.mkdir(exist_ok=True)
+    plot_path = plots_dir / "cosine_similarity_vs_alpha.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    print(f"Plot saved: {plot_path}")
+    plt.show()
+    print(f"\nResults saved to: {results_dir}")
+    print("Done!")
