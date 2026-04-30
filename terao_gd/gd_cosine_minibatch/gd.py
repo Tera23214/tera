@@ -31,15 +31,15 @@ from terao_gamp_gaussian.graph import RandomGraph
 # Configuration
 # ============================================================================
 
-N1 = 10000
-N2 = 10000
-M = 100
+N1 = 200
+N2 = 200
+M = 50
 
-ALPHA_START =5.2
-ALPHA_STOP = 7
+ALPHA_START = 0
+ALPHA_STOP = 4
 ALPHA_STEP = 0.2
 
-MAX_STEPS = 500000
+MAX_STEPS =  200000
 BATCH_SIZE = 2000
 LR_SCHEDULE = [
     (0.0, 0.5, 1e-3),
@@ -53,7 +53,7 @@ STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 5
 CONVERGENCE_THRESHOLD = 1e-5
 LOSS_EVAL_INTERVAL = 100
-SAVE_EVERY_REPLICAS = 5
+SAVE_EVERY_REPLICAS = 10
 
 
 # ============================================================================
