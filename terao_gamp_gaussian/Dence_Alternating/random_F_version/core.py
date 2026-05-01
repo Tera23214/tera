@@ -58,8 +58,8 @@ def prepare_shared_alpha_data(
     M: int = 10,
     noise_var: float = 1e-10,
     lam: float = 1.0,
-    global_data: dict[str, torch.Tensor | float | int] | None = None,
-) -> dict[str, torch.Tensor | float | int]:
+    global_data: dict[str, torch.Tensor | float | int | str] | None = None,
+) -> dict[str, torch.Tensor | float | int | str]:
     """
     Prepare graph and observations once for a single alpha using the existing
     random dense-mask graph generator and a fixed random F tensor.
@@ -120,7 +120,8 @@ def train_single_replica(
     return_history: bool = False,
     loss_eval_interval: int = 50,
     early_stop: bool = True,
-    shared_data: dict[str, torch.Tensor | float | int] | None = None,
+    init_epsilon: float | None = None,
+    shared_data: dict[str, torch.Tensor | float | int | str] | None = None,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     """
     Train one replica with the random-F version.
@@ -161,6 +162,7 @@ def train_single_replica(
         return_history=return_history,
         loss_eval_interval=loss_eval_interval,
         early_stop=early_stop,
+        init_epsilon=init_epsilon,
         shared_data=shared_data,
     )
 

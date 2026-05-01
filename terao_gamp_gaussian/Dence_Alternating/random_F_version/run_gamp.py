@@ -95,6 +95,15 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CONVERGENCE_THRESHOLD,
     )
     parser.add_argument(
+        "--init-epsilon",
+        type=float,
+        default=None,
+        help=(
+            "Use informative student initialization: teacher + epsilon * N(0, 1), "
+            "then mean-square normalization. Omit for random Gaussian initialization."
+        ),
+    )
+    parser.add_argument(
         "--devices",
         type=str,
         default=None,
@@ -279,6 +288,7 @@ def _worker_main(
                 damping_beta_max=float(worker_config["beta_max"]),
                 noise_var=float(worker_config["noise_var"]),
                 convergence_threshold=float(worker_config["convergence_threshold"]),
+                init_epsilon=worker_config["init_epsilon"],
                 shared_data=shared_data,
             )
             if device.type == "cuda":
@@ -636,16 +646,23 @@ def save_config(
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
         "teacher_seed": args.shared_seed,
+        "F_seed": args.shared_seed + 1000,
         "graph_seed": args.shared_seed,
         "noise_seed": args.shared_seed,
         "student_seed_base": args.student_seed_base,
+        "student_init_mode": (
+            "teacher_plus_noise_normalized"
+            if args.init_epsilon is not None
+            else "random_gaussian"
+        ),
+        "student_init_epsilon": args.init_epsilon,
         "num_replicas": args.num_replicas,
         "convergence_threshold": args.convergence_threshold,
         "save_every_replicas": args.save_every_replicas,
         "devices": devices,
         "torch_threads_per_worker": args.torch_threads,
         "deterministic_requested": args.deterministic,
-        "evaluation_metric": "cosine_similarity_in_Y_space",
+        "evaluation_metric": "cosine_similarity_in_observed_F_weighted_signal_space",
         "update_scheme": "alternating_W_then_X",
         "onsager_memory_schedule": "half_step",
         "shared_teacher_noise_global": True,
@@ -702,6 +719,7 @@ def main() -> int:
     results_dir = results_root / (
         f"{timestamp}_gamp_Dence_Alternating_random_F_parallel_"
         f"{args.N1}x{args.M}_alpha{args.alpha_start}-{args.alpha_stop}"
+        f"_initeps{args.init_epsilon if args.init_epsilon is not None else 'random'}"
     )
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -722,6 +740,13 @@ def main() -> int:
     print("Execution rule: one worker process per device, one active replica per device")
     print("Teacher / graph / noise seed:", args.shared_seed)
     print("Student seed rule:", f"{args.student_seed_base} + replica_id")
+    if args.init_epsilon is None:
+        print("Student init: random Gaussian")
+    else:
+        print(
+            "Student init: teacher + epsilon * N(0, 1), "
+            f"epsilon={args.init_epsilon} (then mean-square normalization)"
+        )
     print(f"Partial save cadence: every {args.save_every_replicas} replicas")
     print(f"Results directory: {results_dir}")
     print()
@@ -744,6 +769,7 @@ def main() -> int:
         "noise_var": args.noise_var,
         "shared_seed": args.shared_seed,
         "convergence_threshold": args.convergence_threshold,
+        "init_epsilon": args.init_epsilon,
         "torch_threads": args.torch_threads,
         "deterministic": args.deterministic,
     }
