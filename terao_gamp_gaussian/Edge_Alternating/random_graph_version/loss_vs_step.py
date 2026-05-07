@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Parallel loss-vs-step runner for the random-F version of Dence_Alternating.
+Parallel loss-vs-step runner for the random-graph version of Edge_Alternating.
 
-This keeps the numerical update path in ``random_F_version.core`` and only
+This keeps the numerical update path in ``random_graph_version.core`` and only
 parallelizes replica execution. Each worker owns one device, reuses the shared
 fixed-alpha teacher / graph / noise data on that device, and returns the full
 recorded history for aggregation in the parent process.
@@ -34,20 +34,19 @@ sys.path.insert(0, str(repo_root))
 
 
 DEFAULT_ALPHA = 3.0
-DEFAULT_N1 = 200
-DEFAULT_N2 = 200
-DEFAULT_M = 50
-DEFAULT_MAX_STEPS = 50000
+DEFAULT_N1 = 2000
+DEFAULT_N2 = 2000
+DEFAULT_M = 200
+DEFAULT_MAX_STEPS = 10000
 DEFAULT_DAMPING = 0.0
 DEFAULT_DAMPING_SCHEDULE = "constant"
 DEFAULT_BETA_SCALE = 1e-2
 DEFAULT_BETA_MAX = 0.4
-DEFAULT_NOISE_VAR = 1e-6
+DEFAULT_NOISE_VAR = 1e-5
 DEFAULT_SHARED_SEED = 1
 DEFAULT_STUDENT_SEED_BASE = 100
 DEFAULT_NUM_REPLICAS = 1
 DEFAULT_CONVERGENCE_THRESHOLD = 1e-6
-DEFAULT_INIT_EPSILON = None
 DEFAULT_SAVE_EVERY_REPLICAS = 1
 DEFAULT_TORCH_THREADS = 1
 
@@ -55,8 +54,8 @@ DEFAULT_TORCH_THREADS = 1
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run fixed-alpha loss-vs-step replicas for the random-F version "
-            "of Dence_Alternating in parallel, one worker process per device."
+            "Run fixed-alpha loss-vs-step replicas for the random-graph version "
+            "of Edge_Alternating in parallel, one worker process per device."
         )
     )
     parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
@@ -86,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SHARED_SEED,
         help=(
             "Legacy compatibility argument. This script uses the fixed shared "
-            "seed policy from random_F_version."
+            "seed policy from random_graph_version."
         ),
     )
     parser.add_argument(
@@ -109,11 +108,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--init-epsilon",
         type=float,
-        default=DEFAULT_INIT_EPSILON,
+        default=None,
         help=(
             "Use informative student initialization: teacher + epsilon * N(0, 1), "
-            "then mean-square normalization. Set DEFAULT_INIT_EPSILON=None for "
-            "random Gaussian initialization."
+            "then mean-square normalization. Omit for random Gaussian initialization."
         ),
     )
     parser.add_argument(
@@ -239,7 +237,7 @@ def save_config(
     devices: list[str],
 ) -> None:
     config = {
-        "algorithm": "gamp_Dence_Alternating_random_F_loss_vs_step_parallel",
+        "algorithm": "gamp_Edge_Alternating_random_graph_loss_vs_step_parallel",
         "graph_model": "random_graph",
         "parallelism": "one_worker_process_per_device_one_replica_at_a_time",
         "alpha": args.alpha,
@@ -614,7 +612,7 @@ def _worker_main(
                 torch.backends.cudnn.benchmark = False
             torch.use_deterministic_algorithms(True, warn_only=True)
 
-        from terao_gamp_gaussian.Dence_Alternating.random_F_version.core import (
+        from terao_gamp_gaussian.Edge_Alternating.random_graph_version.core import (
             prepare_global_shared_data,
             prepare_shared_alpha_data,
             train_single_replica,
@@ -781,8 +779,8 @@ def main() -> int:
         raise ValueError("--save-every-replicas must be positive.")
 
     print("=" * 60)
-    print("Parallel Loss vs Step for Dense-mask Alternating G-AMP")
-    print("Evaluation Metric: Cosine Similarity in observed F-weighted signal space")
+    print("Parallel Loss vs Step for Edge-observed Alternating G-AMP")
+    print("Evaluation Metric: Cosine Similarity in Y-space")
     print("=" * 60)
     print(f"Devices: {', '.join(devices)}")
     print(f"alpha={args.alpha}, N1={args.N1}, N2={args.N2}, M={args.M}")
@@ -820,7 +818,7 @@ def main() -> int:
         else Path(__file__).parent / "results"
     )
     results_dir = results_root / (
-        f"{timestamp}_loss_vs_step_Dence_Alternating_random_F_alpha{args.alpha}_"
+        f"{timestamp}_loss_vs_step_Edge_Alternating_alpha{args.alpha}_"
         f"{args.N1}x{args.N2}_M{args.M}"
         f"_initeps{args.init_epsilon if args.init_epsilon is not None else 'random'}"
     )
