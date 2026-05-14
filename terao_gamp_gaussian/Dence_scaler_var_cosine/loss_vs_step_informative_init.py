@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-max", type=float, default=0.7)
     parser.add_argument("--noise-var", type=float, default=1e-6)
     parser.add_argument("--lam", type=float, default=1.0)
-    parser.add_argument("--init-sigma", type=float, default=1.0)
+    parser.add_argument("--init-epsilon", "--init-sigma", dest="init_epsilon", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--num-replicas", type=int, default=1)
     parser.add_argument("--convergence-threshold", type=float, default=1e-6)
@@ -104,8 +104,8 @@ def save_config(
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
         "lam": args.lam,
-        "informative_init_sigma": args.init_sigma,
-        "student_initialization": "teacher_plus_sigma_times_gaussian_noise",
+        "informative_init_epsilon": args.init_epsilon,
+        "student_initialization": "epsilon_teacher_plus_sqrt_epsilon_minus_epsilon_squared_noise",
         "student_initialization_noise_distribution": "N(0, 1)",
         "teacher_seed": args.seed,
         "graph_seed": args.seed,
@@ -238,7 +238,7 @@ def plot_linear_loss(
     ax.set_xlabel("Step", fontsize=13)
     ax.set_ylabel("Observed MSE", fontsize=13)
     ax.set_title(
-        f"Observed MSE vs Step (alpha={args.alpha}, sigma={args.init_sigma}, "
+        f"Observed MSE vs Step (alpha={args.alpha}, epsilon={args.init_epsilon}, "
         f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
@@ -283,7 +283,7 @@ def plot_log_loss(
     ax.set_xlabel("Step", fontsize=13)
     ax.set_ylabel("log10(Observed MSE)", fontsize=13)
     ax.set_title(
-        f"log10(Observed MSE) vs Step (alpha={args.alpha}, sigma={args.init_sigma}, "
+        f"log10(Observed MSE) vs Step (alpha={args.alpha}, epsilon={args.init_epsilon}, "
         f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
@@ -333,7 +333,7 @@ def plot_cosine_similarity(
     ax.set_xlabel("Step", fontsize=13)
     ax.set_ylabel("Cosine Similarity", fontsize=13)
     ax.set_title(
-        f"Cosine Similarity vs Step (alpha={args.alpha}, sigma={args.init_sigma}, "
+        f"Cosine Similarity vs Step (alpha={args.alpha}, epsilon={args.init_epsilon}, "
         f"N1={args.N1}, N2={args.N2}, M={args.M}, {args.num_replicas} replicas)",
         fontsize=14,
     )
@@ -358,7 +358,7 @@ def main() -> None:
     print("Evaluation Metric: Cosine Similarity in Y-space")
     print("=" * 60)
     print(f"Device: {device}")
-    print(f"alpha={args.alpha}, sigma={args.init_sigma}")
+    print(f"alpha={args.alpha}, epsilon={args.init_epsilon}")
     print(f"N1={args.N1}, N2={args.N2}, M={args.M}")
     if args.damping_schedule == "beta":
         print(
@@ -369,8 +369,8 @@ def main() -> None:
         print(f"max_steps={args.max_steps}, damping={args.damping}")
     print(f"replicas={args.num_replicas}, teacher/graph/noise seed={args.seed}")
     print(f"Student seed rule: {student_seed_base} + replica_index")
-    print("Student init: teacher + sigma * noise, noise ~ N(0, 1)")
-    print("Student init target: both W and X, then normalize to unit variance")
+    print("Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)")
+    print("Student init target: both W and X")
     print("Shared across run: teacher / noisy field")
     print("Shared per alpha: graph")
     print("Replica-specific: informative student noise only")
@@ -404,7 +404,7 @@ def main() -> None:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir_name = (
-        f"{timestamp}_loss_vs_step_dense_informative_sigma{args.init_sigma}_"
+        f"{timestamp}_loss_vs_step_dense_informative_epsilon{args.init_epsilon}_"
         f"alpha{args.alpha}_{args.N1}x{args.N2}_M{args.M}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
@@ -441,7 +441,7 @@ def main() -> None:
             noise_var=args.noise_var,
             convergence_threshold=args.convergence_threshold,
             lam=args.lam,
-            informative_init_sigma=args.init_sigma,
+            informative_init_epsilon=args.init_epsilon,
             return_history=True,
             loss_eval_interval=1,
             early_stop=False,

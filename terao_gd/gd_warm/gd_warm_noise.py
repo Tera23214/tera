@@ -4,7 +4,7 @@ Warm Start with Observation Noise.
 
 Two noise sources:
 1) Observation noise on Y (sigma_y)
-2) Initialization noise on W/X (sigma_init)
+2) Initialization correlation epsilon on W/X
 
 Q_Y is computed against the noise-free teacher matrices.
 """
@@ -47,8 +47,9 @@ NUM_REPLICAS = 5
 # Observation noise (standard deviation)
 SIGMA_Y = 0.1
 
-# Initialization noise (standard deviation). Use multiple values for comparison.
-SIGMA_INIT_VALUES = [float('inf'), 0.1, 0.5, 1.0, 4.0, 10.0]  # inf = cold start
+# Initialization epsilon. Finite values use
+# student = epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1).
+SIGMA_INIT_VALUES = [float('inf'), 0.0, 0.1, 0.5, 1.0]  # inf = cold start
 
 CONVERGENCE_THRESHOLD = 1e-6
 
@@ -133,10 +134,15 @@ def train_single_replica(alpha, sigma_init, sigma_y, device, seed):
         W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
         X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
     else:
-        W_hat = W_teacher + sigma_init * torch.randn(N1, M, device=device, dtype=torch.float32)
-        X_hat = X_teacher + sigma_init * torch.randn(M, N2, device=device, dtype=torch.float32)
-        W_hat = normalize_to_unit_mean_square(W_hat)
-        X_hat = normalize_to_unit_mean_square(X_hat)
+        if not 0.0 <= sigma_init <= 1.0:
+            raise ValueError(f"epsilon_init must satisfy 0 <= epsilon <= 1, got {sigma_init}.")
+        noise_scale = math.sqrt(sigma_init - sigma_init * sigma_init)
+        W_hat = sigma_init * W_teacher + noise_scale * torch.randn(
+            N1, M, device=device, dtype=torch.float32
+        )
+        X_hat = sigma_init * X_teacher + noise_scale * torch.randn(
+            M, N2, device=device, dtype=torch.float32
+        )
 
     # AGD loop with LR scaled by sqrt of edge count
     # Using sqrt(C) instead of C for better balance between convergence and stability
@@ -186,8 +192,8 @@ if __name__ == "__main__":
     print(f"Matrix: {N1}x{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
     print(f"Sigma_Y: {SIGMA_Y}")
-    print(f"Sigma_init values: {SIGMA_INIT_VALUES}")
-    print(f"Replicas per (alpha, sigma_init): {NUM_REPLICAS}")
+    print(f"Epsilon_init values: {SIGMA_INIT_VALUES}")
+    print(f"Replicas per (alpha, epsilon_init): {NUM_REPLICAS}")
     print()
 
     # Create results directory
@@ -205,7 +211,8 @@ if __name__ == "__main__":
         "alpha_stop": ALPHA_STOP,
         "alpha_step": ALPHA_STEP,
         "sigma_y": SIGMA_Y,
-        "sigma_init_values": [str(s) for s in SIGMA_INIT_VALUES],
+        "epsilon_init_values": [str(s) for s in SIGMA_INIT_VALUES],
+        "student_init_formula": "epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)",
         "num_replicas": NUM_REPLICAS,
         "max_steps": MAX_STEPS,
         "device": str(device),
@@ -222,7 +229,7 @@ if __name__ == "__main__":
     start_time = time.time()
 
     for sigma_init in SIGMA_INIT_VALUES:
-        print(f"\n--- sigma_init = {sigma_init} ---")
+        print(f"\n--- epsilon_init = {sigma_init} ---")
         for alpha in alphas:
             qy_values = []
             for rep in range(NUM_REPLICAS):
@@ -236,7 +243,7 @@ if __name__ == "__main__":
             results[sigma_init][alpha] = {"mean": mean_qy, "std": std_qy, "values": qy_values}
 
             print(
-                f"sigma_init={sigma_init}, alpha={alpha:.2f}: "
+                f"epsilon_init={sigma_init}, alpha={alpha:.2f}: "
                 f"Q_Y = {mean_qy:.4f} +- {std_qy:.4f} [{completed}/{total_tasks}]"
             )
 
@@ -270,7 +277,7 @@ if __name__ == "__main__":
             capsize=4,
             capthick=1.5,
             elinewidth=1.5,
-            label=f"sigma_init = {sigma_init}",
+            label=f"epsilon_init = {sigma_init}",
         )
 
     ax.set_xlabel(r"$\alpha$ (observation density)", fontsize=14)

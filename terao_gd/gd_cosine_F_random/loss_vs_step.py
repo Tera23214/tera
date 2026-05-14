@@ -140,7 +140,8 @@ def save_config(
             "Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise"
         ),
         "F_shape": [args.N, args.N, args.M],
-        "F_distribution": "standard_normal",
+        "F_distribution": "rademacher_pm1",
+        "effective_F_values": "+/- lambda / sqrt(M)",
         "max_steps": args.max_steps,
         "lr": lr,
         "lr_base": args.lr_base,

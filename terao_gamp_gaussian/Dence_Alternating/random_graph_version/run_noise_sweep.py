@@ -108,9 +108,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_INIT_EPSILON,
         help=(
-            "Use informative student initialization: teacher + epsilon * N(0, 1), "
-            "then mean-square normalization. Set DEFAULT_INIT_EPSILON=None for "
-            "random Gaussian initialization."
+            "Use informative student initialization: epsilon * teacher + "
+            "sqrt(epsilon - epsilon^2) * N(0, 1). Set DEFAULT_INIT_EPSILON=None "
+            "for random Gaussian initialization."
         ),
     )
     parser.add_argument(
@@ -677,7 +677,7 @@ def save_config(
         "noise_seed": args.shared_seed,
         "student_seed_base": args.student_seed_base,
         "student_init_mode": (
-            "teacher_plus_noise_normalized"
+            "correlated_gaussian"
             if args.init_epsilon is not None
             else "random_gaussian"
         ),
@@ -772,8 +772,8 @@ def main() -> int:
         print("Student init: random Gaussian")
     else:
         print(
-            "Student init: teacher + epsilon * N(0, 1), "
-            f"epsilon={args.init_epsilon} (then mean-square normalization)"
+            "Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1), "
+            f"epsilon={args.init_epsilon}"
         )
     print(f"Partial save cadence: every {args.save_every_replicas} replicas")
     print(f"Results directory: {results_dir}")

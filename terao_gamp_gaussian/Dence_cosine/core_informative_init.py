@@ -7,11 +7,10 @@ This variant keeps the exact node-dependent Onsager / variance terms from
 the Dence_cosine formulation while initializing both student matrices from
 teacher-correlated Gaussian noise:
 
-    W_student = W_teacher + sigma * noise_W
-    X_student = X_teacher + sigma * noise_X
+    W_student = epsilon * W_teacher + sqrt(epsilon - epsilon^2) * noise_W
+    X_student = epsilon * X_teacher + sqrt(epsilon - epsilon^2) * noise_X
 
-with noise ~ N(0, 1) independently for each replica. The initialized student
-matrices are normalized to unit variance before the G-AMP iterations start.
+with noise ~ N(0, 1) independently for each replica.
 """
 
 import math
@@ -25,7 +24,11 @@ repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.graph import BiregularGraph
-from terao_gamp_gaussian.utils import f_input, normalize_to_unit_variance
+from terao_gamp_gaussian.utils import (
+    f_input,
+    initialize_correlated_student,
+    normalize_to_unit_variance,
+)
 
 
 def compute_y_cosine_similarity(
@@ -313,25 +316,17 @@ def initialize_informative_student_messages(
     W_teacher: torch.Tensor,
     X_teacher: torch.Tensor,
     seed: int,
-    informative_init_sigma: float,
+    informative_init_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Initialize both student matrices with teacher-correlated Gaussian noise:
 
-        student = teacher + sigma * noise, noise ~ N(0, 1).
-
-    The initialized student matrices are normalized to unit variance so they
-    stay on the same scale as the random initialization baseline.
+        student = epsilon * teacher + sqrt(epsilon - epsilon^2) * noise,
+        noise ~ N(0, 1).
     """
-    if informative_init_sigma < 0.0:
-        raise ValueError("informative_init_sigma must be non-negative.")
-
     torch.manual_seed(seed + 2000)
-    noise_W = torch.randn_like(W_teacher)
-    noise_X = torch.randn_like(X_teacher)
-
-    m_W = normalize_to_unit_variance(W_teacher + informative_init_sigma * noise_W)
-    m_X = normalize_to_unit_variance(X_teacher + informative_init_sigma * noise_X)
+    m_W = initialize_correlated_student(W_teacher, informative_init_epsilon)
+    m_X = initialize_correlated_student(X_teacher, informative_init_epsilon)
     v_W = torch.ones_like(m_W)
     v_X = torch.ones_like(m_X)
 
@@ -353,7 +348,7 @@ def train_single_replica(
     noise_var: float = 1e-10,
     convergence_threshold: float = 1e-6,
     lam: float = 1.0,
-    informative_init_sigma: float = 1.0,
+    informative_init_epsilon: float = 1.0,
     return_history: bool = False,
     loss_eval_interval: int = 50,
     early_stop: bool = True,
@@ -404,7 +399,7 @@ def train_single_replica(
         W_teacher=W_teacher,
         X_teacher=X_teacher,
         seed=seed,
-        informative_init_sigma=informative_init_sigma,
+        informative_init_epsilon=informative_init_epsilon,
     )
     g_prev_dense = torch.zeros((N1, N2), device=device, dtype=torch.float32)
 

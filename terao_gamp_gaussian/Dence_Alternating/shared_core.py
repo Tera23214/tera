@@ -15,7 +15,11 @@ import torch
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.utils import f_input, normalize_to_unit_variance
+from terao_gamp_gaussian.utils import (
+    f_input,
+    initialize_correlated_student,
+    normalize_to_unit_variance,
+)
 
 
 def compute_y_cosine_similarity(
@@ -369,12 +373,14 @@ def prepare_global_shared_data(
     F_full = None
     if f_mode == "random":
         torch.manual_seed(seed + 1000)
-        F_full = torch.randn((N1, N2, M), device=device, dtype=torch.float32)
+        F_full = torch.empty((N1, N2, M), device=device, dtype=torch.float32)
+        F_full.bernoulli_(0.5).mul_(2.0).sub_(1.0)
 
     shared_global: dict[str, torch.Tensor | float | int | str] = {
         "seed": seed,
         "scale": scale,
         "f_mode": f_mode,
+        "f_distribution": "rademacher_pm1" if f_mode == "random" else "constant_one",
         "W_teacher": W_teacher,
         "X_teacher": X_teacher,
         "teacher_w_t": teacher_w_t,
@@ -463,24 +469,16 @@ def _initialize_student_factors(
     Initialize student factors.
 
     When init_epsilon is provided, start near the teacher:
-        student = teacher + epsilon * N(0, 1)
-    and normalize each factor matrix to unit mean-square.
+        student = epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1).
     """
-    if init_epsilon is not None and init_epsilon < 0.0:
-        raise ValueError(
-            f"init_epsilon must be non-negative or None, got {init_epsilon}."
-        )
-
     torch.manual_seed(seed + 2000)
 
     if init_epsilon is None:
         m_W = torch.randn_like(W_teacher)
         m_X = torch.randn_like(X_teacher)
     else:
-        noise_W = torch.randn_like(W_teacher)
-        noise_X = torch.randn_like(X_teacher)
-        m_W = normalize_to_unit_variance(W_teacher + init_epsilon * noise_W)
-        m_X = normalize_to_unit_variance(X_teacher + init_epsilon * noise_X)
+        m_W = initialize_correlated_student(W_teacher, init_epsilon)
+        m_X = initialize_correlated_student(X_teacher, init_epsilon)
 
     v_W = torch.ones_like(m_W)
     v_X = torch.ones_like(m_X)

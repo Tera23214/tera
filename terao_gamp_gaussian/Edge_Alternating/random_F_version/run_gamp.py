@@ -102,9 +102,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_INIT_EPSILON,
         help=(
-            "Use informative student initialization: teacher + epsilon * N(0, 1), "
-            "then mean-square normalization. Set DEFAULT_INIT_EPSILON=None for "
-            "random Gaussian initialization."
+            "Use informative student initialization: epsilon * teacher + "
+            "sqrt(epsilon - epsilon^2) * N(0, 1). Set DEFAULT_INIT_EPSILON=None "
+            "for random Gaussian initialization."
         ),
     )
     parser.add_argument(
@@ -340,6 +340,8 @@ def save_config(
         "algorithm": "gamp_Edge_Alternating_random_F_parallel",
         "graph_model": "random_graph",
         "f_mode": "random",
+        "f_distribution": "rademacher_pm1",
+        "effective_F_values": "+/- lambda / sqrt(M)",
         "parallelism": "one_worker_process_per_device_one_replica_at_a_time",
         "N1": args.N1,
         "N2": args.N2,
@@ -360,9 +362,14 @@ def save_config(
         "f_seed": args.shared_seed + 1000,
         "student_seed_base": args.student_seed_base,
         "student_init_mode": (
-            "teacher_plus_noise_normalized"
+            "correlated_gaussian"
             if args.init_epsilon is not None
             else "random_gaussian"
+        ),
+        "student_init_formula": (
+            "epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)"
+            if args.init_epsilon is not None
+            else "N(0, 1)"
         ),
         "student_init_epsilon": args.init_epsilon,
         "num_replicas": args.num_replicas,
@@ -436,8 +443,8 @@ def main() -> int:
         print("Student init: random Gaussian")
     else:
         print(
-            "Student init: teacher + epsilon * N(0, 1), "
-            f"epsilon={args.init_epsilon} (then mean-square normalization)"
+            "Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1), "
+            f"epsilon={args.init_epsilon}"
         )
     print(f"Partial save cadence: every {args.save_every_replicas} replicas")
     print(f"Results directory: {results_dir}")

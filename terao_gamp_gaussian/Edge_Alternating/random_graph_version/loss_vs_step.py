@@ -110,8 +110,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Use informative student initialization: teacher + epsilon * N(0, 1), "
-            "then mean-square normalization. Omit for random Gaussian initialization."
+            "Use informative student initialization: epsilon * teacher + "
+            "sqrt(epsilon - epsilon^2) * N(0, 1). Omit for random Gaussian initialization."
         ),
     )
     parser.add_argument(
@@ -255,7 +255,7 @@ def save_config(
         "noise_seed": args.shared_seed,
         "student_seed_base": args.student_seed_base,
         "student_init_mode": (
-            "teacher_plus_noise_normalized"
+            "correlated_gaussian"
             if args.init_epsilon is not None
             else "random_gaussian"
         ),
@@ -799,8 +799,8 @@ def main() -> int:
         print("Student init: random Gaussian")
     else:
         print(
-            "Student init: teacher + epsilon * N(0, 1), "
-            f"epsilon={args.init_epsilon} (then mean-square normalization)"
+            "Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1), "
+            f"epsilon={args.init_epsilon}"
         )
     print("Shared across all replicas: fixed-alpha teacher / noisy field")
     print("Shared per alpha: graph")

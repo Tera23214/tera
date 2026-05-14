@@ -5,7 +5,31 @@ Utility functions for G-AMP.
 Provides helper functions for Q_Y calculation and normalization.
 """
 
+import math
+
 import torch
+
+
+def validate_correlated_epsilon(epsilon: float, name: str = "epsilon") -> None:
+    """
+    Validate epsilon for student = epsilon * teacher + sqrt(epsilon - epsilon^2) * noise.
+    """
+    if not 0.0 <= epsilon <= 1.0:
+        raise ValueError(f"{name} must satisfy 0 <= epsilon <= 1, got {epsilon}.")
+
+
+def initialize_correlated_student(
+    teacher: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """
+    Initialize a student tensor correlated with the teacher:
+
+        student = epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1).
+    """
+    validate_correlated_epsilon(epsilon)
+    noise_scale = math.sqrt(epsilon - epsilon * epsilon)
+    return epsilon * teacher + noise_scale * torch.randn_like(teacher)
 
 
 def normalize_to_unit_variance(tensor: torch.Tensor) -> torch.Tensor:

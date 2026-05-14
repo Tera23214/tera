@@ -61,7 +61,7 @@ def prepare_shared_alpha_data(
     global_data: dict[str, torch.Tensor | float | int | str] | None = None,
 ) -> dict[str, torch.Tensor | float | int | str]:
     """
-    Prepare graph, observed random spreading coefficients, and observations
+    Prepare graph, observed Rademacher spreading coefficients, and observations
     once for a single alpha.
     """
     if global_data is None:
@@ -97,6 +97,7 @@ def prepare_shared_alpha_data(
             "C2": C2,
             "graph_model": "random_graph",
             "f_mode": "random",
+            "f_distribution": "rademacher_pm1",
         },
     )
 
@@ -116,7 +117,8 @@ def prepare_shared_alpha_data(
     # This reseed is isolated to shared alpha data construction. Replica
     # initialization later uses its own explicit seed path.
     torch.manual_seed(seed + 1000)
-    F_edge = torch.randn((E, M), device=device, dtype=torch.float32)
+    F_edge = torch.empty((E, M), device=device, dtype=torch.float32)
+    F_edge.bernoulli_(0.5).mul_(2.0).sub_(1.0)
 
     i_long = i_idx.long()
     j_long = j_idx.long()

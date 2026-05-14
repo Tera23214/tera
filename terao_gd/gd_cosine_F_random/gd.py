@@ -6,7 +6,7 @@ Observation model:
     Y_ij = lambda / sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise
 
 where
-    F: (N, N, M), F_ij,mu ~ N(0, 1)
+    F: (N, N, M), F_ij,mu in {-1, +1}
     W: (N, M)
     X: (M, N)
 
@@ -359,7 +359,8 @@ def prepare_global_shared_data(
     torch.manual_seed(seed + 500)
     f_device = resolve_f_storage_device(f_storage_device, device)
     f_torch_dtype = resolve_f_dtype(f_dtype)
-    F = torch.randn(N, N, M, device=f_device, dtype=f_torch_dtype)
+    F = torch.empty(N, N, M, device=f_device, dtype=f_torch_dtype)
+    F.bernoulli_(0.5).mul_(2.0).sub_(1.0)
 
     torch.manual_seed(seed + 1000)
     noise_full = torch.randn((N, N), device=device, dtype=torch.float32)
@@ -370,6 +371,8 @@ def prepare_global_shared_data(
         "W_teacher": W_teacher,
         "X_teacher": X_teacher,
         "F": F,
+        "F_distribution": "rademacher_pm1",
+        "effective_F_values": "+/- lambda / sqrt(M)",
         "F_storage_device": str(f_device),
         "F_dtype": str(f_torch_dtype).replace("torch.", ""),
         "noise_full": noise_full,
@@ -731,7 +734,8 @@ if __name__ == "__main__":
             "Y_ij = lambda/sqrt(M) * sum_mu F_ij,mu W_i,mu X_mu,j + noise"
         ),
         "F_shape": [N, N, M],
-        "F_distribution": "standard_normal",
+        "F_distribution": "rademacher_pm1",
+        "effective_F_values": "+/- lambda / sqrt(M)",
         "alpha_start": ALPHA_START,
         "alpha_stop": ALPHA_STOP,
         "alpha_step": ALPHA_STEP,

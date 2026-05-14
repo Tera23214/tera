@@ -15,7 +15,12 @@ import torch
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
-from terao_gamp_gaussian.utils import f_input, g_out, normalize_to_unit_variance
+from terao_gamp_gaussian.utils import (
+    f_input,
+    g_out,
+    initialize_correlated_student,
+    normalize_to_unit_variance,
+)
 
 
 def compute_y_cosine_similarity(
@@ -473,25 +478,17 @@ def _initialize_student_factors(
     """
     Initialize student factors.
 
-    When init_epsilon is provided, start near the teacher:
-        student = teacher + epsilon * N(0, 1)
-    and normalize each factor matrix to unit mean-square.
+    When init_epsilon is provided:
+        student = epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1).
     """
-    if init_epsilon is not None and init_epsilon < 0.0:
-        raise ValueError(
-            f"init_epsilon must be non-negative or None, got {init_epsilon}."
-        )
-
     torch.manual_seed(seed + 2000)
 
     if init_epsilon is None:
         m_W = torch.randn_like(W_teacher)
         m_X = torch.randn_like(X_teacher)
     else:
-        noise_W = torch.randn_like(W_teacher)
-        noise_X = torch.randn_like(X_teacher)
-        m_W = normalize_to_unit_variance(W_teacher + init_epsilon * noise_W)
-        m_X = normalize_to_unit_variance(X_teacher + init_epsilon * noise_X)
+        m_W = initialize_correlated_student(W_teacher, init_epsilon)
+        m_X = initialize_correlated_student(X_teacher, init_epsilon)
 
     v_W = torch.ones_like(m_W)
     v_X = torch.ones_like(m_X)

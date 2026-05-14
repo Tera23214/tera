@@ -61,9 +61,10 @@ CONVERGENCE_CHECK_INTERVAL = 20
 # Observation noise (standard deviation)
 SIGMA_Y = 1  # Nearly noiseless for clean comparison
 
-# Initialization noise levels (distance from teacher at start of forward sweep)
-# 0 = exact teacher, inf = random initialization
-SIGMA_INIT_VALUES = [0.0, 1.0, 4.0, float('inf')]
+# Initialization epsilon values at start of forward sweep.
+# Finite values use student = epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1).
+# epsilon=1 is exact teacher, inf is random initialization.
+SIGMA_INIT_VALUES = [0.0, 0.1, 0.5, 1.0, float('inf')]
 
 # ============================================================================
 # AGD Helper Functions (Standard model without F)
@@ -208,23 +209,19 @@ def initialize_matrices(
     device: torch.device,
     seed: int,
 ):
-    """Initialize W, X based on sigma_init."""
+    """Initialize W, X from epsilon_init."""
     torch.manual_seed(seed + 2000)
     
     if math.isinf(sigma_init):
         # Random initialization (cold start)
         W = torch.randn(N1, M, device=device) * 0.01
         X = torch.randn(M, N2, device=device) * 0.01
-    elif sigma_init == 0.0:
-        # Exact teacher (perfect warm start)
-        W = W_teacher.clone()
-        X = X_teacher.clone()
     else:
-        # Teacher + noise
-        W = W_teacher + sigma_init * torch.randn(N1, M, device=device)
-        X = X_teacher + sigma_init * torch.randn(M, N2, device=device)
-        W = normalize_to_unit_variance(W)
-        X = normalize_to_unit_variance(X)
+        if not 0.0 <= sigma_init <= 1.0:
+            raise ValueError(f"epsilon_init must satisfy 0 <= epsilon <= 1, got {sigma_init}.")
+        noise_scale = math.sqrt(sigma_init - sigma_init * sigma_init)
+        W = sigma_init * W_teacher + noise_scale * torch.randn(N1, M, device=device)
+        X = sigma_init * X_teacher + noise_scale * torch.randn(M, N2, device=device)
     
     return W, X
 
@@ -365,7 +362,7 @@ if __name__ == "__main__":
     
     print(f"Matrix: {N1}×{N2}, M={M}")
     print(f"Alpha: {ALPHA_MIN} → {ALPHA_MAX} (step {ALPHA_STEP})")
-    print(f"Sigma_init values: {SIGMA_INIT_VALUES}")
+    print(f"Epsilon_init values: {SIGMA_INIT_VALUES}")
     print(f"Replicas: {NUM_REPLICAS}")
     print()
     
@@ -382,7 +379,8 @@ if __name__ == "__main__":
         'alpha_min': ALPHA_MIN,
         'alpha_max': ALPHA_MAX,
         'alpha_step': ALPHA_STEP,
-        'sigma_init_values': [str(s) for s in SIGMA_INIT_VALUES],
+        'epsilon_init_values': [str(s) for s in SIGMA_INIT_VALUES],
+        'student_init_formula': 'epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)',
         'num_replicas': NUM_REPLICAS,
         'max_steps_per_alpha': MAX_STEPS_PER_ALPHA,
         'lr': LR,
@@ -390,14 +388,14 @@ if __name__ == "__main__":
     with open(results_dir / "config.yaml", 'w') as f:
         yaml.dump(config, f)
     
-    # Run for each sigma_init
+    # Run for each epsilon_init
     all_results = {}
     start_time = time.time()
     
     for sigma_init in SIGMA_INIT_VALUES:
         s_label = "inf" if math.isinf(sigma_init) else f"{sigma_init}"
         print(f"\n{'='*50}")
-        print(f"sigma_init = {s_label}")
+        print(f"epsilon_init = {s_label}")
         print('='*50)
         
         # Aggregate over replicas
@@ -484,7 +482,7 @@ if __name__ == "__main__":
     fig, ax = plt.subplots(figsize=(12, 8))
     
     for idx, sigma_init in enumerate(SIGMA_INIT_VALUES):
-        s_label = "∞ (Cold)" if math.isinf(sigma_init) else f"{sigma_init}" if sigma_init > 0 else "0 (Teacher)"
+        s_label = "∞ (Cold)" if math.isinf(sigma_init) else f"{sigma_init}" if sigma_init < 1 else "1 (Teacher)"
         r = all_results[sigma_init]
         
         ax.plot(r['forward']['alphas'], r['forward']['mean'],

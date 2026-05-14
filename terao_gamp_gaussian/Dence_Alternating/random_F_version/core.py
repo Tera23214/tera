@@ -35,7 +35,7 @@ def prepare_global_shared_data(
     lam: float = 1.0,
 ) -> dict[str, torch.Tensor | float | int | str]:
     """
-    Prepare teacher, noise, and F_{ijmu} ~ N(0, 1) for the random-F version.
+    Prepare teacher, noise, and F_{ijmu} in {-1, +1} for the random-F version.
     """
     return _prepare_global_shared_data(
         device=device,
@@ -98,6 +98,7 @@ def prepare_shared_alpha_data(
             "C2": C2,
             "graph_model": "random_graph",
             "f_mode": "random",
+            "f_distribution": "rademacher_pm1",
         },
     )
 

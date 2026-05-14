@@ -117,7 +117,7 @@ def save_config(
         "beta_max": args.beta_max,
         "noise_var": args.noise_var,
         "student_init_mode": (
-            "teacher_plus_noise_normalized"
+            "correlated_gaussian"
             if args.init_epsilon is not None
             else "random_gaussian"
         ),
@@ -171,8 +171,8 @@ def main() -> None:
         print("Student init: random Gaussian")
     else:
         print(
-            "Student init: teacher + epsilon * N(0, 1), "
-            f"epsilon={args.init_epsilon} (then mean-square normalization)"
+            "Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1), "
+            f"epsilon={args.init_epsilon}"
         )
     print("Step definition: one W update followed by one X update")
     print("Onsager memory: advanced every half-step")

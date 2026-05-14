@@ -40,7 +40,7 @@ USE_STEP_DAMPING = True
 DAMPING_BETA_SCALE = 1e-3
 DAMPING_BETA_MAX = DAMPING
 NOISE_VAR = 0
-INIT_SIGMA = 1.0
+INIT_EPSILON = 1.0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 1
@@ -64,7 +64,7 @@ if __name__ == "__main__":
 
     print(f"Matrix: {N1}×{N2}, M={M}")
     print(f"Alpha: {ALPHA_START} ~ {ALPHA_STOP} (step {ALPHA_STEP})")
-    print(f"Informative init sigma: {INIT_SIGMA}")
+    print(f"Informative init epsilon: {INIT_EPSILON}")
     if USE_STEP_DAMPING:
         print(
             f"Steps: {MAX_STEPS}, Damping schedule: "
@@ -75,8 +75,8 @@ if __name__ == "__main__":
     print(f"Replicas per alpha: {NUM_REPLICAS}")
     print("Teacher / graph / noise seed: 1")
     print("Student seed rule: 100 + replica_id")
-    print("Student init: teacher + sigma * noise, noise ~ N(0, 1)")
-    print("Student init target: both W and X, then normalize to unit variance")
+    print("Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)")
+    print("Student init target: both W and X")
     print("Shared across run: teacher / noisy field")
     print("Shared per alpha: graph")
     print("Replica-specific: informative student noise only")
@@ -84,7 +84,7 @@ if __name__ == "__main__":
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir_name = (
-        f"{timestamp}_gamp_Dence_F_1_onsager_cosine_informative_sigma{INIT_SIGMA}_"
+        f"{timestamp}_gamp_Dence_F_1_onsager_cosine_informative_epsilon{INIT_EPSILON}_"
         f"{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
@@ -105,8 +105,8 @@ if __name__ == "__main__":
         "damping_beta_scale": DAMPING_BETA_SCALE,
         "damping_beta_max": DAMPING_BETA_MAX,
         "noise_var": NOISE_VAR,
-        "informative_init_sigma": INIT_SIGMA,
-        "student_initialization": "teacher_plus_sigma_times_gaussian_noise",
+        "informative_init_epsilon": INIT_EPSILON,
+        "student_initialization": "epsilon_teacher_plus_sqrt_epsilon_minus_epsilon_squared_noise",
         "student_initialization_noise_distribution": "N(0, 1)",
         "teacher_seed": SHARED_SEED,
         "graph_seed": SHARED_SEED,
@@ -176,7 +176,7 @@ if __name__ == "__main__":
                 damping_beta_max=DAMPING_BETA_MAX,
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
-                informative_init_sigma=INIT_SIGMA,
+                informative_init_epsilon=INIT_EPSILON,
                 shared_data=shared_data,
             )
 
@@ -248,7 +248,7 @@ if __name__ == "__main__":
     ax.set_ylabel("Cosine Similarity", fontsize=14)
     ax.set_title(
         f"Phase Transition (Dense-mask G-AMP with F=1 + Onsager + informative init)\n"
-        f"({N1}×{N2}, M={M}, sigma={INIT_SIGMA}, {MAX_STEPS} steps)",
+        f"({N1}×{N2}, M={M}, epsilon={INIT_EPSILON}, {MAX_STEPS} steps)",
         fontsize=16,
     )
     ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)

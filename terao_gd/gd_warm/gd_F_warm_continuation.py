@@ -50,8 +50,9 @@ NUM_REPLICAS = 5
 CONVERGENCE_THRESHOLD = 1e-8  # Stop when loss change is below this
 CONVERGENCE_CHECK_INTERVAL = 20  # Check every N steps
 
-# Initialization noise levels (distance from teacher)
-# 0 = exact teacher, inf = random initialization
+# Initialization epsilon levels.
+# Finite values use student = epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1).
+# epsilon=1 is exact teacher, inf is random initialization.
 SIGMA_INIT_VALUES = [0.0, 0.1, 0.5, 1.0, float('inf')]
 
 # ============================================================================
@@ -111,7 +112,7 @@ def agd_step_X_with_F(W, X, Y, F, i_idx_long, j_idx_long, j_idx_exp, lr):
 # ============================================================================
 
 def train_continuation(
-    sigma_init: float,  # Initialization noise: 0=teacher, inf=random
+    sigma_init: float,  # Initialization epsilon: 1=teacher, inf=random
     device: torch.device,
     seed: int,
 ):
@@ -119,9 +120,9 @@ def train_continuation(
     Train using α-continuation method with AGD.
     
     Args:
-        sigma_init: Initialization noise standard deviation
-            - 0: Start exactly at teacher
-            - >0: Start at teacher + sigma_init * noise
+        sigma_init: Initialization epsilon
+            - finite: epsilon * teacher + sqrt(epsilon - epsilon^2) * noise
+            - 1: Start exactly at teacher
             - inf: Random initialization
         device: torch device
         seed: Random seed
@@ -153,23 +154,19 @@ def train_continuation(
     X_sel_full = X_teacher[:, j_idx_full.long()].T
     Y_full = (1.0 / math.sqrt(M)) * (F_full * W_sel_full * X_sel_full).sum(dim=1)
     
-    # Initialize W, X based on sigma_init
+    # Initialize W, X based on epsilon_init
     torch.manual_seed(seed + 2000)
     
     if math.isinf(sigma_init):
         # Random initialization (cold start)
         W = torch.randn(N1, M, device=device) * 0.01
         X = torch.randn(M, N2, device=device) * 0.01
-    elif sigma_init == 0.0:
-        # Exact teacher (perfect warm start)
-        W = W_teacher.clone()
-        X = X_teacher.clone()
     else:
-        # Teacher + noise
-        W = W_teacher + sigma_init * torch.randn(N1, M, device=device)
-        X = X_teacher + sigma_init * torch.randn(M, N2, device=device)
-        W = normalize_to_unit_variance(W)
-        X = normalize_to_unit_variance(X)
+        if not 0.0 <= sigma_init <= 1.0:
+            raise ValueError(f"epsilon_init must satisfy 0 <= epsilon <= 1, got {sigma_init}.")
+        noise_scale = math.sqrt(sigma_init - sigma_init * sigma_init)
+        W = sigma_init * W_teacher + noise_scale * torch.randn(N1, M, device=device)
+        X = sigma_init * X_teacher + noise_scale * torch.randn(M, N2, device=device)
     
     results = {}
     
@@ -257,7 +254,8 @@ if __name__ == "__main__":
         'max_steps_per_alpha': MAX_STEPS_PER_ALPHA,
         'lr': LR,
         'num_replicas': NUM_REPLICAS,
-        'sigma_init_values': [str(s) for s in SIGMA_INIT_VALUES],
+        'epsilon_init_values': [str(s) for s in SIGMA_INIT_VALUES],
+        'student_init_formula': 'epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)',
         'device': str(device),
     }
     with open(results_dir / "config.yaml", 'w') as f:
@@ -266,7 +264,7 @@ if __name__ == "__main__":
     # Run simulations
     start_time = time.time()
     
-    # Results storage: {sigma_init: {alpha: [qy values]}}
+    # Results storage: {epsilon_init: {alpha: [qy values]}}
     all_results = {s: {} for s in SIGMA_INIT_VALUES}
     
     alphas = np.linspace(ALPHA_MIN, ALPHA_MAX, ALPHA_STEPS)
@@ -274,7 +272,7 @@ if __name__ == "__main__":
         for alpha in alphas:
             all_results[s][alpha] = []
     
-    # Run for each sigma_init (sequential - parallel was slower on MPS)
+    # Run for each epsilon_init (sequential - parallel was slower on MPS)
     total_tasks = len(SIGMA_INIT_VALUES) * NUM_REPLICAS
     completed = 0
     
@@ -331,7 +329,7 @@ if __name__ == "__main__":
     markers = ['v', 'D', '^', 's', 'o']
     
     for idx, sigma_init in enumerate(SIGMA_INIT_VALUES):
-        s_label = "∞ (Random)" if math.isinf(sigma_init) else f"{sigma_init}" if sigma_init > 0 else "0 (Teacher)"
+        s_label = "∞ (Random)" if math.isinf(sigma_init) else f"{sigma_init}" if sigma_init < 1 else "1 (Teacher)"
         
         ax.errorbar(alphas_list, stats[sigma_init]['means'], 
                     yerr=stats[sigma_init]['sems'],
@@ -353,7 +351,7 @@ if __name__ == "__main__":
     ax.legend(loc='lower right', fontsize=11)
     
     plt.tight_layout()
-    plot_path = plots_dir / "qy_vs_alpha_sigma_init.png"
+    plot_path = plots_dir / "qy_vs_alpha_epsilon_init.png"
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     print(f"Plot saved: {plot_path}")
     plt.show()
@@ -378,4 +376,3 @@ if __name__ == "__main__":
     print("Done!")
 
 # %%
-

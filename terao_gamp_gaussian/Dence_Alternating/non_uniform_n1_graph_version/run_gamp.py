@@ -41,7 +41,7 @@ ALPHA_STEP = 0.2
 
 P = 0.2
 R = 5
-INIT_EPSILON = None #uninformative => None, studet = teacher + epsilon*N(0,1)
+INIT_EPSILON = None  # uninformative => None; otherwise epsilon*teacher + sqrt(epsilon-epsilon^2)*N(0,1)
 
 MAX_STEPS = 50000
 DAMPING = 0
@@ -83,8 +83,8 @@ if __name__ == "__main__":
         print("Student init: random Gaussian")
     else:
         print(
-            "Student init: teacher + epsilon * N(0, 1), "
-            f"epsilon={INIT_EPSILON} (then mean-square normalization)"
+            "Student init: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1), "
+            f"epsilon={INIT_EPSILON}"
         )
     if USE_STEP_DAMPING:
         print(
@@ -118,7 +118,7 @@ if __name__ == "__main__":
         "p": P,
         "r": R,
         "student_init_mode": (
-            "teacher_plus_noise_normalized"
+            "correlated_gaussian"
             if INIT_EPSILON is not None
             else "random_gaussian"
         ),
