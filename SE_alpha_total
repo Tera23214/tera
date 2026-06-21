@@ -1,0 +1,150 @@
+#!/usr/bin/env wolframscript
+
+ClearAll[
+  optionValue,
+  normalizeNumberString,
+  parseNumber,
+  parseInteger,
+  parseLambdaValues,
+  buildLambdaValues,
+  runOneLambda
+];
+
+scriptPath = If[StringLength[$InputFileName] > 0, $InputFileName, First[$ScriptCommandLine]];
+scriptDir = DirectoryName[scriptPath];
+args = Rest[$ScriptCommandLine];
+
+optionValue[argList_List, name_String, default_] := Module[{pos},
+  pos = FirstPosition[argList, name, None];
+  If[pos === None || pos[[1]] >= Length[argList],
+    default,
+    argList[[pos[[1]] + 1]]
+  ]
+];
+
+normalizeNumberString[value_String] := StringReplace[
+  value,
+  RegularExpression["([0-9.]+)[eE]([+-]?[0-9]+)"] -> "$1*^$2"
+];
+
+parseNumber[value_] := N[ToExpression[normalizeNumberString[ToString[value]]]];
+
+parseInteger[value_] := Round[parseNumber[value]];
+
+parseLambdaValues[text_String] := parseNumber /@ Select[
+  StringSplit[text, {",", " ", "\t", "\n"}],
+  StringLength[#] > 0 &
+];
+
+buildLambdaValues[argList_List] := Module[
+  {explicit, start, stop, step},
+  explicit = optionValue[argList, "--lambdas", ""];
+  If[StringLength[explicit] > 0,
+    Return[parseLambdaValues[explicit]]
+  ];
+
+  start = parseNumber[optionValue[argList, "--lambda-start", "0.5"]];
+  stop = parseNumber[optionValue[argList, "--lambda-stop", "5.0"]];
+  step = parseNumber[optionValue[argList, "--lambda-step", "0.1"]];
+
+  If[step <= 0, Print["--lambda-step must be positive."]; Exit[2]];
+  N[Range[start, stop + step/2, step]]
+];
+
+If[MemberQ[args, "--help"],
+  Print["Usage:"];
+  Print["  wolframscript -file tera/SE_alpha_total --lambdas 1,1.5,2,2.5,3"];
+  Print["  wolframscript -file tera/SE_alpha_total --lambda-start 0.5 --lambda-stop 5 --lambda-step 0.1"];
+  Print["Options:"];
+  Print["  --N1 INT --N2 INT --alpha-total FLOAT --a FLOAT"];
+  Print["  --tol FLOAT --max-iter INT --eps FLOAT --output PATH"];
+  Print["Definitions:"];
+  Print["  r = N1/N2"];
+  Print["  alpha_w = alpha_total (1 + r)/(2 r)"];
+  Print["  alpha_x = alpha_total (1 + r)/2"];
+  Print["Output:"];
+  Print["  lambda m_w m_x m_y, where m_y = m_w m_x"];
+  Exit[0]
+];
+
+config = Module[
+  {n1, n2, alphaTotal, ratio, alphaW, alphaX},
+  n1 = parseInteger[optionValue[args, "--N1", "2500"]];
+  n2 = parseInteger[optionValue[args, "--N2", "2500"]];
+  If[n1 <= 0 || n2 <= 0, Print["--N1 and --N2 must be positive."]; Exit[2]];
+
+  alphaTotal = parseNumber[optionValue[args, "--alpha-total", "1.6"]];
+  ratio = N[n1/n2];
+  alphaW = alphaTotal (1 + ratio)/(2 ratio);
+  alphaX = alphaTotal (1 + ratio)/2;
+
+  <|
+    "N1" -> n1,
+    "N2" -> n2,
+    "ratio" -> ratio,
+    "alphaTotal" -> alphaTotal,
+    "alphaW" -> alphaW,
+    "alphaX" -> alphaX,
+    "a" -> parseNumber[optionValue[args, "--a", "0.01"]],
+    "tol" -> parseNumber[optionValue[args, "--tol", "1e-12"]],
+    "maxIter" -> parseInteger[optionValue[args, "--max-iter", "1000"]],
+    "eps" -> parseNumber[optionValue[args, "--eps", "1"]],
+    "output" -> optionValue[args, "--output", FileNameJoin[{scriptDir, "SE_alpha_total_results.dat"}]]
+  |>
+];
+
+lambdaValues = buildLambdaValues[args];
+
+runOneLambda[lambda_, cfg_Association] := Module[
+  {
+    alphaW = cfg["alphaW"],
+    alphaX = cfg["alphaX"],
+    eps = cfg["eps"],
+    tol = cfg["tol"],
+    maxIter = cfg["maxIter"],
+    mw = cfg["a"],
+    mx = cfg["a"],
+    t = 0,
+    diff = Infinity,
+    v,
+    chi,
+    mwProposal,
+    mxProposal,
+    mwNext,
+    mxNext
+  },
+  While[t < maxIter && diff > tol,
+    v = lambda^2 (1 - mw mx);
+    chi = 1/(1 + v);
+
+    mwProposal = alphaW lambda^2 mw chi/(1 + alphaW lambda^2 mw chi);
+    mxProposal = alphaX lambda^2 mx chi/(1 + alphaX lambda^2 mx chi);
+
+    mwNext = mw + eps (mwProposal - mw);
+    mxNext = mx + eps (mxProposal - mx);
+    diff = Max[Abs[mwNext - mw], Abs[mxNext - mx]];
+
+    mw = mwNext;
+    mx = mxNext;
+    t++;
+  ];
+
+  <|"lambda" -> lambda, "m_w" -> mw, "m_x" -> mx, "m_y" -> mw mx|>
+];
+
+results = runOneLambda[#, config] & /@ lambdaValues;
+header = {"lambda", "m_w", "m_x", "m_y"};
+table = Prepend[(Lookup[#, header] &) /@ results, header];
+
+Export[config["output"], table, "Table"];
+
+Print[
+  "alpha_total=" <> ToString[FortranForm[config["alphaTotal"]]] <>
+  ", N1=" <> ToString[config["N1"]] <>
+  ", N2=" <> ToString[config["N2"]] <>
+  ", r=" <> ToString[FortranForm[config["ratio"]]] <>
+  ", alpha_w=" <> ToString[FortranForm[config["alphaW"]]] <>
+  ", alpha_x=" <> ToString[FortranForm[config["alphaX"]]]
+];
+Print["Saved: " <> config["output"]];
+Print[ExportString[table, "Table"]];

@@ -1,0 +1,143 @@
+#!/usr/bin/env wolframscript
+
+ClearAll[
+  optionValue,
+  hasOption,
+  normalizeNumberString,
+  parseNumber,
+  parseInteger,
+  parseLambdaValues,
+  buildLambdaValues,
+  runOneLambda
+];
+
+scriptPath = If[StringLength[$InputFileName] > 0, $InputFileName, First[$ScriptCommandLine]];
+scriptDir = DirectoryName[scriptPath];
+args = Rest[$ScriptCommandLine];
+
+optionValue[argList_List, name_String, default_] := Module[{pos},
+  pos = FirstPosition[argList, name, None];
+  If[pos === None || pos[[1]] >= Length[argList],
+    default,
+    argList[[pos[[1]] + 1]]
+  ]
+];
+
+hasOption[argList_List, name_String] := MemberQ[argList, name];
+
+normalizeNumberString[value_String] := StringReplace[
+  value,
+  RegularExpression["([0-9.]+)[eE]([+-]?[0-9]+)"] -> "$1*^$2"
+];
+
+parseNumber[value_] := N[ToExpression[normalizeNumberString[ToString[value]]]];
+
+parseInteger[value_] := Round[parseNumber[value]];
+
+parseLambdaValues[text_String] := parseNumber /@ Select[
+  StringSplit[text, {",", " ", "\t", "\n"}],
+  StringLength[#] > 0 &
+];
+
+buildLambdaValues[argList_List] := Module[
+  {explicit, lambdaValue, start, stop, step},
+  explicit = optionValue[argList, "--lambdas", ""];
+  If[StringLength[explicit] > 0,
+    Return[parseLambdaValues[explicit]]
+  ];
+
+  lambdaValue = optionValue[argList, "--lambda", ""];
+  If[StringLength[lambdaValue] > 0,
+    Return[{parseNumber[lambdaValue]}]
+  ];
+
+  start = parseNumber[optionValue[argList, "--lambda-start", "0.5"]];
+  stop = parseNumber[optionValue[argList, "--lambda-stop", "5.0"]];
+  step = parseNumber[optionValue[argList, "--lambda-step", "0.1"]];
+
+  If[step <= 0, Print["--lambda-step must be positive."]; Exit[2]];
+  N[Range[start, stop + step/2, step]]
+];
+
+If[MemberQ[args, "--help"],
+  Print["Usage:"];
+  Print["  wolframscript -file tera/SE_t --lambda 2.0 --alpha-w 1.6"];
+  Print["  wolframscript -file tera/SE_t --lambdas 1,2,3 --alpha-w 1.6"];
+  Print["  wolframscript -file tera/SE_t --lambda-start 0.5 --lambda-stop 5 --lambda-step 0.1"];
+  Print["Options:"];
+  Print["  --N1 INT --N2 INT --alpha-w FLOAT --lambda FLOAT --lambdas LIST"];
+  Print["  --lambda-start FLOAT --lambda-stop FLOAT --lambda-step FLOAT"];
+  Print["  --a FLOAT --tol FLOAT --max-iter INT --eps FLOAT --output PATH"];
+  Print["  --no-early-stop"];
+  Print["Output:"];
+  Print["  lambda t m_w m_x m_y, where m_y = m_w m_x"];
+  Exit[0]
+];
+
+config = <|
+  "N1" -> parseInteger[optionValue[args, "--N1", "2000"]],
+  "N2" -> parseInteger[optionValue[args, "--N2", "1000"]],
+  "alphaW" -> parseNumber[optionValue[args, "--alpha-w", "1.4"]],
+  "a" -> parseNumber[optionValue[args, "--a", "0.01"]],
+  "tol" -> parseNumber[optionValue[args, "--tol", "1e-12"]],
+  "maxIter" -> parseInteger[optionValue[args, "--max-iter", "1000"]],
+  "eps" -> parseNumber[optionValue[args, "--eps", "1"]],
+  "earlyStop" -> Not[hasOption[args, "--no-early-stop"]],
+  "output" -> optionValue[args, "--output", FileNameJoin[{scriptDir, "SE_t_results.dat"}]]
+|>;
+
+lambdaValues = buildLambdaValues[args];
+
+runOneLambda[lambda_, cfg_Association] := Module[
+  {
+    n1 = cfg["N1"],
+    n2 = cfg["N2"],
+    alphaW = cfg["alphaW"],
+    alphaX,
+    eps = cfg["eps"],
+    tol = cfg["tol"],
+    maxIter = cfg["maxIter"],
+    earlyStop = cfg["earlyStop"],
+    mw = cfg["a"],
+    mx = cfg["a"],
+    t = 0,
+    diff = Infinity,
+    v,
+    chi,
+    mwProposal,
+    mxProposal,
+    mwNext,
+    mxNext,
+    history
+  },
+  alphaX = (n1/n2) alphaW;
+  history = {<|"lambda" -> lambda, "t" -> t, "m_w" -> mw, "m_x" -> mx, "m_y" -> mw mx|>};
+
+  While[t < maxIter && (Not[earlyStop] || diff > tol),
+    v = lambda^2 (1 - mw mx);
+    chi = 1/(1 + v);
+
+    mwProposal = alphaW lambda^2 mw chi/(1 + alphaW lambda^2 mw chi);
+    mxProposal = alphaX lambda^2 mx chi/(1 + alphaX lambda^2 mx chi);
+
+    mwNext = mw + eps (mwProposal - mw);
+    mxNext = mx + eps (mxProposal - mx);
+    diff = Max[Abs[mwNext - mw], Abs[mxNext - mx]];
+
+    mw = mwNext;
+    mx = mxNext;
+    t++;
+    AppendTo[history, <|"lambda" -> lambda, "t" -> t, "m_w" -> mw, "m_x" -> mx, "m_y" -> mw mx|>];
+  ];
+
+  history
+];
+
+results = Flatten[runOneLambda[#, config] & /@ lambdaValues];
+header = {"lambda", "t", "m_w", "m_x", "m_y"};
+table = Prepend[(Lookup[#, header] &) /@ results, header];
+
+Export[config["output"], table, "Table"];
+
+Print["Saved: " <> config["output"]];
+Print[ExportString[table, "Table"]];

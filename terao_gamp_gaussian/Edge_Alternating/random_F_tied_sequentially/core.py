@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """
-Sequentially aggregated F=1 version of Edge_Alternating.
+Sequentially aggregated random-F tied-factor version of Edge_Alternating.
 
-This variant keeps the memory-saving edge-chunk aggregation, but uses the
-constant spreading coefficient F=1 on every observed edge and component.
+This variant keeps the same observed-edge random-F aggregation as
+``random_F_sequentially`` but enforces the heuristic one-variable constraint
+``X = W.T`` after initialization and after each alternating half-step.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from typing import Any
 
 import torch
 
@@ -20,7 +20,6 @@ sys.path.insert(0, str(repo_root))
 
 from terao_gamp_gaussian.Edge_Alternating.shared_core import (  # noqa: E402
     compute_step_damping,
-    prepare_global_shared_data as _prepare_global_shared_data,
 )
 from terao_gamp_gaussian.graph import BiregularGraph  # noqa: E402
 from terao_gamp_gaussian.utils import (  # noqa: E402
@@ -46,6 +45,24 @@ def _edge_ranges(E: int, edge_chunk_size: int):
         yield chunk_id, start, min(start + edge_chunk_size, E)
 
 
+def _reset_f_stream(f_seed: int) -> None:
+    torch.manual_seed(int(f_seed))
+
+
+def _make_f_chunk(
+    num_edges: int,
+    M: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Draw the next Rademacher F chunk from the current torch RNG stream.
+    """
+    F_chunk = torch.empty((num_edges, M), device=device, dtype=dtype)
+    F_chunk.bernoulli_(0.5).mul_(2.0).sub_(1.0)
+    return F_chunk
+
+
 def prepare_global_shared_data(
     device: torch.device,
     seed: int = 1,
@@ -55,15 +72,39 @@ def prepare_global_shared_data(
     noise_var: float = 1e-10,
     lam: float = 1.0,
 ) -> dict[str, torch.Tensor | float | int | str]:
-    return _prepare_global_shared_data(
-        device=device,
-        seed=seed,
-        N1=N1,
-        N2=N2,
-        M=M,
-        noise_var=noise_var,
-        lam=lam,
-    )
+    """
+    Prepare a tied teacher with ``X_teacher = W_teacher.T``.
+    """
+    if N1 != N2:
+        raise ValueError("The tied-factor model requires N1 == N2.")
+
+    scale = lam / math.sqrt(M)
+
+    torch.manual_seed(seed)
+    W_teacher = torch.randn(N1, M, device=device, dtype=torch.float32)
+    X_teacher = W_teacher.T.contiguous()
+    teacher_w_t = W_teacher.T.contiguous()
+    teacher_x_t = X_teacher.T.contiguous()
+    teacher_w_gram = teacher_w_t @ W_teacher
+    teacher_x_gram = X_teacher @ teacher_x_t
+    teacher_norm_sq = torch.sum(teacher_w_gram * teacher_x_gram.T)
+
+    torch.manual_seed(seed)
+    noise_full = torch.randn((N1, N2), device=device, dtype=torch.float32)
+    noise_full = noise_full * math.sqrt(noise_var)
+
+    return {
+        "seed": seed,
+        "scale": scale,
+        "W_teacher": W_teacher,
+        "X_teacher": X_teacher,
+        "teacher_w_t": teacher_w_t,
+        "teacher_x_t": teacher_x_t,
+        "teacher_norm_sq": teacher_norm_sq,
+        "noise_full": noise_full,
+        "tied_factors": True,
+        "tied_rule": "X = W.T",
+    }
 
 
 def prepare_shared_alpha_data(
@@ -79,9 +120,11 @@ def prepare_shared_alpha_data(
     global_data: dict[str, torch.Tensor | float | int | str] | None = None,
 ) -> dict[str, torch.Tensor | float | int | str]:
     """
-    Prepare graph and observations for fixed F=1 without storing E x M
-    intermediate tensors.
+    Prepare graph and observations without storing the full E x M random F.
     """
+    if N1 != N2:
+        raise ValueError("The tied-factor model requires N1 == N2.")
+
     if global_data is None:
         global_data = prepare_global_shared_data(
             device=device,
@@ -110,17 +153,25 @@ def prepare_shared_alpha_data(
     teacher_norm_sq = global_data["teacher_norm_sq"]
     noise_full = global_data["noise_full"]
     scale = float(global_data["scale"])
+    f_seed = int(seed) + 1000
     chunk_size = _resolve_edge_chunk_size(edge_chunk_size, E)
 
     y_clean_obs = torch.empty(E, dtype=torch.float32, device=device)
     y_noisy_obs = torch.empty(E, dtype=torch.float32, device=device)
 
+    _reset_f_stream(f_seed)
     for _chunk_id, start, end in _edge_ranges(E, chunk_size):
         i_chunk = i_idx[start:end].long()
         j_chunk = j_idx[start:end].long()
+        F_chunk = _make_f_chunk(
+            num_edges=end - start,
+            M=M,
+            device=device,
+            dtype=torch.float32,
+        )
         W_sel = W_teacher[i_chunk, :]
         X_sel = X_teacher[:, j_chunk].T
-        y_clean = scale * (W_sel * X_sel).sum(dim=1)
+        y_clean = scale * (W_sel * F_chunk * X_sel).sum(dim=1)
         y_clean_obs[start:end] = y_clean
         y_noisy_obs[start:end] = y_clean + noise_full[i_chunk, j_chunk]
 
@@ -141,9 +192,9 @@ def prepare_shared_alpha_data(
         "Y_clean_obs": y_clean_obs,
         "Y_noisy_obs": y_noisy_obs,
         "graph_model": "random_graph",
-        "f_mode": "fixed",
-        "f_distribution": "constant_one",
-        "f_value": 1.0,
+        "f_mode": "random",
+        "f_distribution": "rademacher_pm1",
+        "f_seed": f_seed,
         "edge_chunk_size": chunk_size,
         "sequential_aggregation": True,
     }
@@ -159,20 +210,33 @@ def _initialize_student_factors(
 
     if init_epsilon is None:
         m_W = torch.randn_like(W_teacher)
-        m_X = torch.randn_like(X_teacher)
     else:
         m_W = initialize_correlated_student(W_teacher, init_epsilon)
-        m_X = initialize_correlated_student(X_teacher, init_epsilon)
+
+    m_X = m_W.T.contiguous()
 
     if init_epsilon is not None and math.isclose(
         float(init_epsilon), 1.0, rel_tol=0.0, abs_tol=1e-12
     ):
         v_W = m_W ** 2
-        v_X = m_X ** 2
     else:
         v_W = torch.ones_like(m_W)
-        v_X = torch.ones_like(m_X)
+    v_X = v_W.T.contiguous()
     return m_W, v_W, m_X, v_X
+
+
+def _tie_x_to_w(
+    m_W: torch.Tensor,
+    v_W: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return m_W.T.contiguous(), v_W.T.contiguous()
+
+
+def _tie_w_to_x(
+    m_X: torch.Tensor,
+    v_X: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return m_X.T.contiguous(), v_X.T.contiguous()
 
 
 def _compute_chunk_output_terms(
@@ -186,6 +250,7 @@ def _compute_chunk_output_terms(
     i_chunk: torch.Tensor,
     j_chunk: torch.Tensor,
     g_prev_chunk: torch.Tensor,
+    F_chunk: torch.Tensor,
     scale: float,
     scale_sq: float,
     noise_var: float,
@@ -210,7 +275,7 @@ def _compute_chunk_output_terms(
     var_term_W = torch.clamp(vW_sel - W_sel ** 2, min=0.0)
     var_term_X = torch.clamp(vX_sel - X_sel ** 2, min=0.0)
 
-    omega_main = scale * (W_sel * X_sel).sum(dim=1)
+    omega_main = scale * (W_sel * F_chunk * X_sel).sum(dim=1)
     onsager_W_side = scale_sq * (var_term_X * W_sel * W_prev_sel).sum(dim=1)
     onsager_X_side = scale_sq * (var_term_W * X_sel * X_prev_sel).sum(dim=1)
     V = scale_sq * (vW_sel * vX_sel - (W_sel ** 2) * (X_sel ** 2)).sum(dim=1)
@@ -239,6 +304,7 @@ def alternating_half_step_W_sequential(
     noise_var: float,
     damping: float,
     M: int,
+    f_seed: int,
     edge_chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     E = int(i_idx.numel())
@@ -251,9 +317,11 @@ def alternating_half_step_W_sequential(
     onsager_W = torch.zeros_like(m_W)
     g_next_edge = torch.empty_like(g_prev_edge)
 
+    _reset_f_stream(f_seed)
     for _chunk_id, start, end in _edge_ranges(E, edge_chunk_size):
         i_chunk = i_idx[start:end].long()
         j_chunk = j_idx[start:end].long()
+        F_chunk = _make_f_chunk(end - start, M, device, m_W.dtype)
         g_edge, dg, _, var_term_X, _, X_sel, _, _ = _compute_chunk_output_terms(
             m_W=m_W,
             v_W=v_W,
@@ -265,6 +333,7 @@ def alternating_half_step_W_sequential(
             i_chunk=i_chunk,
             j_chunk=j_chunk,
             g_prev_chunk=g_prev_edge[start:end],
+            F_chunk=F_chunk,
             scale=scale,
             scale_sq=scale_sq,
             noise_var=noise_var,
@@ -281,7 +350,7 @@ def alternating_half_step_W_sequential(
         sum_W.scatter_add_(
             0,
             i_chunk.unsqueeze(1).expand(-1, M),
-            scale * g_edge.unsqueeze(1) * X_sel,
+            scale * g_edge.unsqueeze(1) * F_chunk * X_sel,
         )
         onsager_W.scatter_add_(
             0,
@@ -314,6 +383,7 @@ def alternating_half_step_X_sequential(
     noise_var: float,
     damping: float,
     M: int,
+    f_seed: int,
     edge_chunk_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     E = int(i_idx.numel())
@@ -326,9 +396,11 @@ def alternating_half_step_X_sequential(
     onsager_X = torch.zeros_like(m_X)
     g_next_edge = torch.empty_like(g_prev_edge)
 
+    _reset_f_stream(f_seed)
     for _chunk_id, start, end in _edge_ranges(E, edge_chunk_size):
         i_chunk = i_idx[start:end].long()
         j_chunk = j_idx[start:end].long()
+        F_chunk = _make_f_chunk(end - start, M, device, m_W.dtype)
         g_edge, dg, var_term_W, _, W_sel, _, _, _ = _compute_chunk_output_terms(
             m_W=m_W,
             v_W=v_W,
@@ -340,6 +412,7 @@ def alternating_half_step_X_sequential(
             i_chunk=i_chunk,
             j_chunk=j_chunk,
             g_prev_chunk=g_prev_edge[start:end],
+            F_chunk=F_chunk,
             scale=scale,
             scale_sq=scale_sq,
             noise_var=noise_var,
@@ -356,7 +429,7 @@ def alternating_half_step_X_sequential(
         sum_X.scatter_add_(
             1,
             j_chunk.unsqueeze(0).expand(M, -1),
-            (scale * g_edge.unsqueeze(1) * W_sel).T.contiguous(),
+            (scale * g_edge.unsqueeze(1) * F_chunk * W_sel).T.contiguous(),
         )
         onsager_X.scatter_add_(
             1,
@@ -381,6 +454,7 @@ def compute_observed_loss(
     i_idx: torch.Tensor,
     j_idx: torch.Tensor,
     scale: float,
+    f_seed: int,
     edge_chunk_size: int,
 ) -> torch.Tensor:
     E = int(i_idx.numel())
@@ -389,12 +463,14 @@ def compute_observed_loss(
 
     _, M = m_W.shape
     loss_sum = torch.zeros((), dtype=m_W.dtype, device=m_W.device)
+    _reset_f_stream(f_seed)
     for _chunk_id, start, end in _edge_ranges(E, edge_chunk_size):
         i_chunk = i_idx[start:end].long()
         j_chunk = j_idx[start:end].long()
+        F_chunk = _make_f_chunk(end - start, M, m_W.device, m_W.dtype)
         W_sel = m_W[i_chunk, :]
         X_sel = m_X[:, j_chunk].T
-        Y_pred = scale * (W_sel * X_sel).sum(dim=1)
+        Y_pred = scale * (W_sel * F_chunk * X_sel).sum(dim=1)
         loss_sum = loss_sum + ((Y_obs[start:end] - Y_pred) ** 2).sum()
 
     return loss_sum / E
@@ -407,6 +483,7 @@ def compute_observed_signal_cosine(
     i_idx: torch.Tensor,
     j_idx: torch.Tensor,
     scale: float,
+    f_seed: int,
     edge_chunk_size: int,
 ) -> torch.Tensor:
     E = int(i_idx.numel())
@@ -418,12 +495,14 @@ def compute_observed_signal_cosine(
     teacher_norm_sq = torch.zeros_like(inner)
     student_norm_sq = torch.zeros_like(inner)
 
+    _reset_f_stream(f_seed)
     for _chunk_id, start, end in _edge_ranges(E, edge_chunk_size):
         i_chunk = i_idx[start:end].long()
         j_chunk = j_idx[start:end].long()
+        F_chunk = _make_f_chunk(end - start, M, m_W.device, m_W.dtype)
         W_sel = m_W[i_chunk, :]
         X_sel = m_X[:, j_chunk].T
-        Y_student = scale * (W_sel * X_sel).sum(dim=1)
+        Y_student = scale * (W_sel * F_chunk * X_sel).sum(dim=1)
         Y_teacher = Y_clean_obs[start:end]
         inner = inner + torch.sum(Y_teacher * Y_student)
         teacher_norm_sq = teacher_norm_sq + torch.sum(Y_teacher ** 2)
@@ -437,10 +516,13 @@ ORDER_PARAMETER_KEYS = [
     "m_overlap_Y",
     "m_overlap_W",
     "m_overlap_X",
+    "m_overlap_S",
     "Q_Y_teacher",
     "cosine_Y",
     "Q_W",
     "Q_X",
+    "Q_S",
+    "tie_error",
     "convergence",
 ]
 
@@ -482,14 +564,23 @@ def compute_dense_order_parameters(
     else:
         convergence_value = float(convergence)
 
+    m_overlap_W = torch.mean(W_teacher * m_W)
+    m_overlap_X = torch.mean(X_teacher * m_X)
+    Q_W = torch.mean(v_W)
+    Q_X = torch.mean(v_X)
+    tie_error = torch.mean(torch.abs(m_X - m_W.T))
+
     return {
         "m_overlap_Y": float(m_overlap_Y.detach().item()),
-        "m_overlap_W": float(torch.mean(W_teacher * m_W).detach().item()),
-        "m_overlap_X": float(torch.mean(X_teacher * m_X).detach().item()),
+        "m_overlap_W": float(m_overlap_W.detach().item()),
+        "m_overlap_X": float(m_overlap_X.detach().item()),
+        "m_overlap_S": float((0.5 * (m_overlap_W + m_overlap_X)).detach().item()),
         "Q_Y_teacher": float(Q_Y_teacher.detach().item()),
         "cosine_Y": float(cosine_Y.detach().item()),
-        "Q_W": float(torch.mean(v_W).detach().item()),
-        "Q_X": float(torch.mean(v_X).detach().item()),
+        "Q_W": float(Q_W.detach().item()),
+        "Q_X": float(Q_X.detach().item()),
+        "Q_S": float((0.5 * (Q_W + Q_X)).detach().item()),
+        "tie_error": float(tie_error.detach().item()),
         "convergence": convergence_value,
     }
 
@@ -537,7 +628,7 @@ def train_single_replica_from_shared_data(
     loss_eval_interval: int | None = None,
     shared_data: dict[str, torch.Tensor | float | int | str] | None = None,
     return_final_state: bool = False,
-) -> tuple[Any, ...]:
+) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     if shared_data is None:
         raise ValueError("shared_data must be provided.")
     if loss_eval_interval is not None:
@@ -550,6 +641,7 @@ def train_single_replica_from_shared_data(
     X_teacher = shared_data["X_teacher"]
     Y_noisy = shared_data["Y_noisy_obs"]
     scale = float(shared_data["scale"])
+    f_seed = int(shared_data["f_seed"])
     edge_chunk_size = int(shared_data["edge_chunk_size"])
     _, M = W_teacher.shape
 
@@ -612,6 +704,7 @@ def train_single_replica_from_shared_data(
                 i_idx=i_idx,
                 j_idx=j_idx,
                 scale=scale,
+                f_seed=f_seed,
                 edge_chunk_size=edge_chunk_size,
             )
             history_loss_tensors.append(loss_tensor.detach())
@@ -654,8 +747,10 @@ def train_single_replica_from_shared_data(
             noise_var=noise_var,
             damping=damping_t,
             M=M,
+            f_seed=f_seed,
             edge_chunk_size=edge_chunk_size,
         )
+        m_X, v_X = _tie_x_to_w(m_W, v_W)
 
         m_W_prev = m_W_before_W
         m_X_prev = m_X_before_W
@@ -677,8 +772,10 @@ def train_single_replica_from_shared_data(
             noise_var=noise_var,
             damping=damping_t,
             M=M,
+            f_seed=f_seed,
             edge_chunk_size=edge_chunk_size,
         )
+        m_W, v_W = _tie_w_to_x(m_X, v_X)
 
         m_W_prev = m_W_before_X
         m_X_prev = m_X_before_X
@@ -698,6 +795,7 @@ def train_single_replica_from_shared_data(
                     i_idx=i_idx,
                     j_idx=j_idx,
                     scale=scale,
+                    f_seed=f_seed,
                     edge_chunk_size=edge_chunk_size,
                 )
                 loss = float(loss_tensor.item())
@@ -714,6 +812,7 @@ def train_single_replica_from_shared_data(
                         i_idx=i_idx,
                         j_idx=j_idx,
                         scale=scale,
+                        f_seed=f_seed,
                         edge_chunk_size=edge_chunk_size,
                     )
                     loss = float(loss_tensor.item())
@@ -744,6 +843,7 @@ def train_single_replica_from_shared_data(
                         i_idx=i_idx,
                         j_idx=j_idx,
                         scale=scale,
+                        f_seed=f_seed,
                         edge_chunk_size=edge_chunk_size,
                     )
                     loss = float(loss_tensor.item())
@@ -810,7 +910,7 @@ def train_single_replica(
     loss_eval_interval: int | None = None,
     shared_data: dict[str, torch.Tensor | float | int | str] | None = None,
     return_final_state: bool = False,
-) -> tuple[Any, ...]:
+) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     if loss_eval_interval is not None:
         eval_interval = loss_eval_interval
 

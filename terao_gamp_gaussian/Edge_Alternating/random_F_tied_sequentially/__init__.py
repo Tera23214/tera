@@ -1,5 +1,5 @@
 """
-Sequentially aggregated F=1 Edge_Alternating G-AMP.
+Sequentially aggregated random-F tied-factor Edge_Alternating G-AMP.
 """
 
 from .core import (

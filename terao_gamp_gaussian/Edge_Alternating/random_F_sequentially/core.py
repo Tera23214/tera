@@ -267,7 +267,7 @@ def alternating_half_step_W_sequential(
     M: int,
     f_seed: int,
     edge_chunk_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     E = int(i_idx.numel())
     device = m_W.device
     scale = lam / math.sqrt(M)
@@ -321,11 +321,12 @@ def alternating_half_step_W_sequential(
 
     Sigma_W = 1.0 / torch.clamp(Sigma_W_denom, min=1e-10)
     T_W = m_W + Sigma_W * (sum_W - onsager_W * m_W_prev)
-    m_W_new, v_W_new = f_input(Sigma_W, T_W)
-    v_W_new = torch.clamp(v_W_new, min=1e-8, max=100.0)
-    m_W_new = damping * m_W + (1.0 - damping) * m_W_new
+    m_W_proposal, v_W_proposal = f_input(Sigma_W, T_W)
+    convergence_sum = torch.sum(torch.abs(m_W_proposal - m_W))
+    v_W_new = torch.clamp(v_W_proposal, min=1e-8, max=100.0)
+    m_W_new = damping * m_W + (1.0 - damping) * m_W_proposal
     v_W_new = damping * v_W + (1.0 - damping) * v_W_new
-    return m_W_new, v_W_new, g_next_edge
+    return m_W_new, v_W_new, g_next_edge, convergence_sum
 
 
 def alternating_half_step_X_sequential(
@@ -345,7 +346,7 @@ def alternating_half_step_X_sequential(
     M: int,
     f_seed: int,
     edge_chunk_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     E = int(i_idx.numel())
     device = m_W.device
     scale = lam / math.sqrt(M)
@@ -399,11 +400,12 @@ def alternating_half_step_X_sequential(
 
     Sigma_X = 1.0 / torch.clamp(Sigma_X_denom, min=1e-10)
     T_X = m_X + Sigma_X * (sum_X - onsager_X * m_X_prev)
-    m_X_new, v_X_new = f_input(Sigma_X, T_X)
-    v_X_new = torch.clamp(v_X_new, min=1e-8, max=100.0)
-    m_X_new = damping * m_X + (1.0 - damping) * m_X_new
+    m_X_proposal, v_X_proposal = f_input(Sigma_X, T_X)
+    convergence_sum = torch.sum(torch.abs(m_X_proposal - m_X))
+    v_X_new = torch.clamp(v_X_proposal, min=1e-8, max=100.0)
+    m_X_new = damping * m_X + (1.0 - damping) * m_X_proposal
     v_X_new = damping * v_X + (1.0 - damping) * v_X_new
-    return m_X_new, v_X_new, g_next_edge
+    return m_X_new, v_X_new, g_next_edge, convergence_sum
 
 
 def compute_observed_loss(
@@ -471,6 +473,91 @@ def compute_observed_signal_cosine(
     return inner / denom
 
 
+ORDER_PARAMETER_KEYS = [
+    "m_overlap_Y",
+    "m_overlap_W",
+    "m_overlap_X",
+    "Q_Y_teacher",
+    "cosine_Y",
+    "Q_W",
+    "Q_X",
+    "convergence",
+]
+
+
+def compute_dense_order_parameters(
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+    m_W: torch.Tensor,
+    v_W: torch.Tensor,
+    m_X: torch.Tensor,
+    v_X: torch.Tensor,
+    convergence: torch.Tensor | float | None = None,
+) -> dict[str, float]:
+    """
+    Compute CLAUDE.md order parameters on the dense N1 x N2 x M space.
+    """
+    N1, M = W_teacher.shape
+    _, N2 = X_teacher.shape
+    normalizer_y = float(N1 * N2 * M)
+
+    w_overlap_by_mu = torch.sum(W_teacher * m_W, dim=0)
+    x_overlap_by_mu = torch.sum(X_teacher * m_X, dim=1)
+    m_overlap_Y = torch.sum(w_overlap_by_mu * x_overlap_by_mu) / normalizer_y
+
+    teacher_w_sq_by_mu = torch.sum(W_teacher ** 2, dim=0)
+    teacher_x_sq_by_mu = torch.sum(X_teacher ** 2, dim=1)
+    Q_Y_teacher = torch.sum(teacher_w_sq_by_mu * teacher_x_sq_by_mu) / normalizer_y
+    student_w_sq_by_mu = torch.sum(m_W ** 2, dim=0)
+    student_x_sq_by_mu = torch.sum(m_X ** 2, dim=1)
+    student_norm_Y = torch.sum(student_w_sq_by_mu * student_x_sq_by_mu) / normalizer_y
+    cosine_Y = m_overlap_Y / torch.sqrt(
+        torch.clamp(Q_Y_teacher * student_norm_Y, min=1e-30)
+    )
+
+    if convergence is None:
+        convergence_value = 0.0
+    elif isinstance(convergence, torch.Tensor):
+        convergence_value = float(convergence.detach().item())
+    else:
+        convergence_value = float(convergence)
+
+    return {
+        "m_overlap_Y": float(m_overlap_Y.detach().item()),
+        "m_overlap_W": float(torch.mean(W_teacher * m_W).detach().item()),
+        "m_overlap_X": float(torch.mean(X_teacher * m_X).detach().item()),
+        "Q_Y_teacher": float(Q_Y_teacher.detach().item()),
+        "cosine_Y": float(cosine_Y.detach().item()),
+        "Q_W": float(torch.mean(v_W).detach().item()),
+        "Q_X": float(torch.mean(v_X).detach().item()),
+        "convergence": convergence_value,
+    }
+
+
+def append_order_parameters(
+    history: dict[str, list[float]],
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+    m_W: torch.Tensor,
+    v_W: torch.Tensor,
+    m_X: torch.Tensor,
+    v_X: torch.Tensor,
+    convergence: torch.Tensor | float | None = None,
+) -> dict[str, float]:
+    order_parameters = compute_dense_order_parameters(
+        W_teacher=W_teacher,
+        X_teacher=X_teacher,
+        m_W=m_W,
+        v_W=v_W,
+        m_X=m_X,
+        v_X=v_X,
+        convergence=convergence,
+    )
+    for key in ORDER_PARAMETER_KEYS:
+        history[key].append(order_parameters[key])
+    return order_parameters
+
+
 def train_single_replica_from_shared_data(
     device: torch.device,
     seed: int,
@@ -483,24 +570,25 @@ def train_single_replica_from_shared_data(
     convergence_threshold: float = 1e-6,
     lam: float = 1.0,
     return_history: bool = False,
-    loss_eval_interval: int = 50,
+    eval_interval: int = 50,
     early_stop: bool = True,
     init_epsilon: float | None = None,
+    track_loss: bool = True,
+    loss_eval_interval: int | None = None,
     shared_data: dict[str, torch.Tensor | float | int | str] | None = None,
+    return_final_state: bool = False,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
     if shared_data is None:
         raise ValueError("shared_data must be provided.")
+    if loss_eval_interval is not None:
+        eval_interval = loss_eval_interval
 
     E = int(shared_data["E"])
-    if E == 0:
-        return 0.0, 0.0, 0
-
     i_idx = shared_data["i_idx"]
     j_idx = shared_data["j_idx"]
     W_teacher = shared_data["W_teacher"]
     X_teacher = shared_data["X_teacher"]
     Y_noisy = shared_data["Y_noisy_obs"]
-    Y_clean = shared_data["Y_clean_obs"]
     scale = float(shared_data["scale"])
     f_seed = int(shared_data["f_seed"])
     edge_chunk_size = int(shared_data["edge_chunk_size"])
@@ -516,40 +604,71 @@ def train_single_replica_from_shared_data(
     m_W_prev = m_W.clone()
     m_X_prev = m_X.clone()
 
-    final_loss = 0.0
+    final_loss = float("nan")
     steps_taken = max_steps
     prev_loss = float("inf")
-    history = {"steps": [], "loss": [], "cosine_similarity": [], "damping": []}
+    history = {
+        "steps": [],
+        "damping": [],
+        **{key: [] for key in ORDER_PARAMETER_KEYS},
+    }
+    if track_loss:
+        history["loss"] = []
     history_loss_tensors = []
-    history_cosine_values = []
+
+    if E == 0:
+        if return_history:
+            history["steps"].append(0)
+            history["damping"].append(0.0)
+            append_order_parameters(
+                history=history,
+                W_teacher=W_teacher,
+                X_teacher=X_teacher,
+                m_W=m_W,
+                v_W=v_W,
+                m_X=m_X,
+                v_X=v_X,
+                convergence=float("nan"),
+            )
+        if return_final_state:
+            final_state = {
+                "m_W": m_W.detach().cpu(),
+                "m_X": m_X.detach().cpu(),
+            }
+            if return_history:
+                return 0.0, 0.0, 0, history, final_state
+            return 0.0, 0.0, 0, final_state
+        if return_history:
+            return 0.0, 0.0, 0, history
+        return 0.0, 0.0, 0
 
     if return_history:
-        m_W_eval = normalize_to_unit_variance(m_W)
-        m_X_eval = normalize_to_unit_variance(m_X)
-        loss_tensor = compute_observed_loss(
-            m_W=m_W_eval,
-            m_X=m_X_eval,
-            Y_obs=Y_noisy,
-            i_idx=i_idx,
-            j_idx=j_idx,
-            scale=scale,
-            f_seed=f_seed,
-            edge_chunk_size=edge_chunk_size,
-        )
-        cosine_similarity_step = compute_observed_signal_cosine(
-            m_W=m_W_eval,
-            m_X=m_X_eval,
-            Y_clean_obs=Y_clean,
-            i_idx=i_idx,
-            j_idx=j_idx,
-            scale=scale,
-            f_seed=f_seed,
-            edge_chunk_size=edge_chunk_size,
-        )
+        if track_loss:
+            m_W_eval = normalize_to_unit_variance(m_W)
+            m_X_eval = normalize_to_unit_variance(m_X)
+            loss_tensor = compute_observed_loss(
+                m_W=m_W_eval,
+                m_X=m_X_eval,
+                Y_obs=Y_noisy,
+                i_idx=i_idx,
+                j_idx=j_idx,
+                scale=scale,
+                f_seed=f_seed,
+                edge_chunk_size=edge_chunk_size,
+            )
+            history_loss_tensors.append(loss_tensor.detach())
         history["steps"].append(0)
-        history_loss_tensors.append(loss_tensor.detach())
-        history_cosine_values.append(float(cosine_similarity_step.item()))
         history["damping"].append(0.0)
+        append_order_parameters(
+            history=history,
+            W_teacher=W_teacher,
+            X_teacher=X_teacher,
+            m_W=m_W,
+            v_W=v_W,
+            m_X=m_X,
+            v_X=v_X,
+            convergence=float("nan"),
+        )
 
     for step in range(max_steps):
         damping_t = compute_step_damping(
@@ -562,7 +681,7 @@ def train_single_replica_from_shared_data(
 
         m_W_before_W = m_W
         m_X_before_W = m_X
-        m_W, v_W, g_prev_edge = alternating_half_step_W_sequential(
+        m_W, v_W, g_prev_edge, convergence_W_sum = alternating_half_step_W_sequential(
             m_W=m_W,
             v_W=v_W,
             m_X=m_X,
@@ -586,7 +705,7 @@ def train_single_replica_from_shared_data(
 
         m_W_before_X = m_W
         m_X_before_X = m_X
-        m_X, v_X, g_prev_edge = alternating_half_step_X_sequential(
+        m_X, v_X, g_prev_edge, convergence_X_sum = alternating_half_step_X_sequential(
             m_W=m_W,
             v_W=v_W,
             m_X=m_X,
@@ -607,44 +726,73 @@ def train_single_replica_from_shared_data(
 
         m_W_prev = m_W_before_X
         m_X_prev = m_X_before_X
+        convergence = (convergence_W_sum + convergence_X_sum) / (
+            (W_teacher.shape[0] + X_teacher.shape[1]) * M
+        )
 
-        if step % loss_eval_interval == 0 or step == max_steps - 1:
-            m_W_eval = normalize_to_unit_variance(m_W)
-            m_X_eval = normalize_to_unit_variance(m_X)
-            loss_tensor = compute_observed_loss(
-                m_W=m_W_eval,
-                m_X=m_X_eval,
-                Y_obs=Y_noisy,
-                i_idx=i_idx,
-                j_idx=j_idx,
-                scale=scale,
-                f_seed=f_seed,
-                edge_chunk_size=edge_chunk_size,
-            )
-
-            if return_history:
-                cosine_similarity_step = compute_observed_signal_cosine(
+        if step % eval_interval == 0 or step == max_steps - 1:
+            loss = None
+            if track_loss and (early_stop or not return_history or step == max_steps - 1):
+                m_W_eval = normalize_to_unit_variance(m_W)
+                m_X_eval = normalize_to_unit_variance(m_X)
+                loss_tensor = compute_observed_loss(
                     m_W=m_W_eval,
                     m_X=m_X_eval,
-                    Y_clean_obs=Y_clean,
+                    Y_obs=Y_noisy,
                     i_idx=i_idx,
                     j_idx=j_idx,
                     scale=scale,
                     f_seed=f_seed,
                     edge_chunk_size=edge_chunk_size,
                 )
-                history["steps"].append(step + 1)
-                history_loss_tensors.append(loss_tensor.detach())
-                history_cosine_values.append(float(cosine_similarity_step.item()))
-                history["damping"].append(damping_t)
-
-            loss = None
-            if early_stop or not return_history or step == max_steps - 1:
                 loss = float(loss_tensor.item())
                 final_loss = loss
 
-            if early_stop:
+            if return_history:
+                if track_loss and loss is None:
+                    m_W_eval = normalize_to_unit_variance(m_W)
+                    m_X_eval = normalize_to_unit_variance(m_X)
+                    loss_tensor = compute_observed_loss(
+                        m_W=m_W_eval,
+                        m_X=m_X_eval,
+                        Y_obs=Y_noisy,
+                        i_idx=i_idx,
+                        j_idx=j_idx,
+                        scale=scale,
+                        f_seed=f_seed,
+                        edge_chunk_size=edge_chunk_size,
+                    )
+                    loss = float(loss_tensor.item())
+                    final_loss = loss
+                if track_loss:
+                    history_loss_tensors.append(loss_tensor.detach())
+                history["steps"].append(step + 1)
+                history["damping"].append(damping_t)
+                append_order_parameters(
+                    history=history,
+                    W_teacher=W_teacher,
+                    X_teacher=X_teacher,
+                    m_W=m_W,
+                    v_W=v_W,
+                    m_X=m_X,
+                    v_X=v_X,
+                    convergence=convergence,
+                )
+
+            if early_stop and track_loss:
                 if loss is None:
+                    m_W_eval = normalize_to_unit_variance(m_W)
+                    m_X_eval = normalize_to_unit_variance(m_X)
+                    loss_tensor = compute_observed_loss(
+                        m_W=m_W_eval,
+                        m_X=m_X_eval,
+                        Y_obs=Y_noisy,
+                        i_idx=i_idx,
+                        j_idx=j_idx,
+                        scale=scale,
+                        f_seed=f_seed,
+                        edge_chunk_size=edge_chunk_size,
+                    )
                     loss = float(loss_tensor.item())
                     final_loss = loss
                 if abs(prev_loss - loss) < convergence_threshold:
@@ -652,28 +800,37 @@ def train_single_replica_from_shared_data(
                     break
                 prev_loss = loss
 
-    m_W = normalize_to_unit_variance(m_W)
-    m_X = normalize_to_unit_variance(m_X)
-    cosine_similarity = compute_observed_signal_cosine(
+    final_order_parameters = compute_dense_order_parameters(
+        W_teacher=W_teacher,
+        X_teacher=X_teacher,
         m_W=m_W,
+        v_W=v_W,
         m_X=m_X,
-        Y_clean_obs=Y_clean,
-        i_idx=i_idx,
-        j_idx=j_idx,
-        scale=scale,
-        f_seed=f_seed,
-        edge_chunk_size=edge_chunk_size,
+        v_X=v_X,
     )
+    cosine_Y = final_order_parameters["cosine_Y"]
 
     if return_history:
-        if history_loss_tensors:
+        if track_loss and history_loss_tensors:
             history["loss"] = torch.stack(history_loss_tensors).cpu().tolist()
-            history["cosine_similarity"] = history_cosine_values
             if not early_stop:
                 final_loss = float(history["loss"][-1])
-        return float(cosine_similarity.item()), final_loss, steps_taken, history
+        if return_final_state:
+            final_state = {
+                "m_W": m_W.detach().cpu(),
+                "m_X": m_X.detach().cpu(),
+            }
+            return cosine_Y, final_loss, steps_taken, history, final_state
+        return cosine_Y, final_loss, steps_taken, history
 
-    return float(cosine_similarity.item()), final_loss, steps_taken
+    if return_final_state:
+        final_state = {
+            "m_W": m_W.detach().cpu(),
+            "m_X": m_X.detach().cpu(),
+        }
+        return cosine_Y, final_loss, steps_taken, final_state
+
+    return cosine_Y, final_loss, steps_taken
 
 
 def train_single_replica(
@@ -692,12 +849,18 @@ def train_single_replica(
     convergence_threshold: float = 1e-6,
     lam: float = 1.0,
     return_history: bool = False,
-    loss_eval_interval: int = 50,
+    eval_interval: int = 50,
     early_stop: bool = True,
     init_epsilon: float | None = None,
     edge_chunk_size: int | None = DEFAULT_EDGE_CHUNK_SIZE,
+    track_loss: bool = True,
+    loss_eval_interval: int | None = None,
     shared_data: dict[str, torch.Tensor | float | int | str] | None = None,
+    return_final_state: bool = False,
 ) -> tuple[float, float, int] | tuple[float, float, int, dict[str, list[float]]]:
+    if loss_eval_interval is not None:
+        eval_interval = loss_eval_interval
+
     if shared_data is None:
         global_data = prepare_global_shared_data(
             device=device,
@@ -733,8 +896,10 @@ def train_single_replica(
         convergence_threshold=convergence_threshold,
         lam=lam,
         return_history=return_history,
-        loss_eval_interval=loss_eval_interval,
+        eval_interval=eval_interval,
         early_stop=early_stop,
         init_epsilon=init_epsilon,
+        track_loss=track_loss,
         shared_data=shared_data,
+        return_final_state=return_final_state,
     )

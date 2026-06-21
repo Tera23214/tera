@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Alternating Gradient Descent (AGD) for sparse matrix factorization with
-cosine-similarity evaluation.
+dense teacher-student overlap evaluation.
 
 This variant aligns the experimental setup with ``gd_cosine_minibatch``:
 - teacher / noise are shared across the whole run
@@ -51,11 +51,66 @@ NOISE_VAR = 0.0
 SHARED_SEED = 1
 STUDENT_SEED_BASE = 100
 NUM_REPLICAS = 5   # Number of replicas per alpha
-CONVERGENCE_THRESHOLD = 1e-5  # Early stopping threshold for loss_per_edge
+CONVERGENCE_THRESHOLD = 1e-5  # Early stopping threshold for loss_per_edge change
+INIT_EPSILON: float | None = 1.0
 
 # ============================================================================
 # AGD Helper Functions
 # ============================================================================
+
+
+def maybe_torch_compile(func):
+    try:
+        return torch.compile(mode="reduce-overhead")(func)
+    except RuntimeError:
+        return func
+
+
+def nan_mean(values: list[float]) -> float:
+    arr = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return float("nan")
+    return float(np.mean(arr[finite]))
+
+
+def nan_std(values: list[float]) -> float:
+    arr = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return float("nan")
+    return float(np.std(arr[finite]))
+
+
+def validate_init_epsilon(init_epsilon: float | None) -> float | None:
+    if init_epsilon is None:
+        return None
+    epsilon = float(init_epsilon)
+    if not 0.0 <= epsilon <= 1.0:
+        raise ValueError("init_epsilon must satisfy 0 <= epsilon <= 1.")
+    return epsilon
+
+
+def initialize_student_factors(
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+    seed: int,
+    init_epsilon: float | None,
+    random_scale: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    torch.manual_seed(seed + 2000)
+    epsilon = validate_init_epsilon(init_epsilon)
+    if epsilon is None:
+        return (
+            torch.randn_like(W_teacher) * float(random_scale),
+            torch.randn_like(X_teacher) * float(random_scale),
+        )
+
+    noise_scale = math.sqrt(max(epsilon - epsilon ** 2, 0.0))
+    W_hat = epsilon * W_teacher + noise_scale * torch.randn_like(W_teacher)
+    X_hat = epsilon * X_teacher + noise_scale * torch.randn_like(X_teacher)
+    return W_hat, X_hat
+
 
 def compute_predictions(
     W: torch.Tensor,       # (N1, M)
@@ -98,7 +153,7 @@ def compute_loss_per_edge(Y: torch.Tensor, Y_pred: torch.Tensor, M: int) -> torc
     return compute_loss(Y, Y_pred, M) / num_edges
 
 
-@torch.compile(mode="reduce-overhead")
+@maybe_torch_compile
 def agd_step_W(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -132,7 +187,7 @@ def agd_step_W(
     return W_new
 
 
-@torch.compile(mode="reduce-overhead")
+@maybe_torch_compile
 def agd_step_X(
     W: torch.Tensor,   # (N1, M)
     X: torch.Tensor,   # (M, N2)
@@ -196,6 +251,46 @@ def compute_y_cosine_similarity(
     denom = torch.sqrt(torch.clamp(teacher_norm_sq * student_norm_sq, min=1e-30))
 
     return (inner / denom).item()
+
+
+ORDER_PARAMETER_KEYS = [
+    "m_overlap_Y",
+    "m_overlap_W",
+    "m_overlap_X",
+    "Q_Y_teacher",
+]
+
+
+def compute_order_parameters(
+    W_hat: torch.Tensor,
+    X_hat: torch.Tensor,
+    W_teacher: torch.Tensor,
+    X_teacher: torch.Tensor,
+) -> dict[str, float]:
+    """
+    Compute dense order parameters defined in CLAUDE.md.
+
+    X tensors use the AGD convention (M, N2), so the X overlap sums over
+    the second axis as the column index j.
+    """
+    N1, M = W_teacher.shape
+    N2 = X_teacher.shape[1]
+    normalizer_y = float(N1 * N2 * M)
+
+    w_overlap_by_mu = torch.sum(W_teacher * W_hat, dim=0)
+    x_overlap_by_mu = torch.sum(X_teacher * X_hat, dim=1)
+    m_overlap_Y = torch.sum(w_overlap_by_mu * x_overlap_by_mu) / normalizer_y
+
+    w_teacher_sq_by_mu = torch.sum(W_teacher ** 2, dim=0)
+    x_teacher_sq_by_mu = torch.sum(X_teacher ** 2, dim=1)
+    Q_Y_teacher = torch.sum(w_teacher_sq_by_mu * x_teacher_sq_by_mu) / normalizer_y
+
+    return {
+        "m_overlap_Y": float(m_overlap_Y.item()),
+        "m_overlap_W": float(torch.mean(W_teacher * W_hat).item()),
+        "m_overlap_X": float(torch.mean(X_teacher * X_hat).item()),
+        "Q_Y_teacher": float(Q_Y_teacher.item()),
+    }
 
 
 def prepare_global_shared_data(
@@ -297,6 +392,8 @@ def train_single_replica(
     noise_var: float = NOISE_VAR,
     convergence_threshold: float = CONVERGENCE_THRESHOLD,
     shared_data: dict[str, torch.Tensor | float | int] | None = None,
+    return_order_parameters: bool = False,
+    init_epsilon: float | None = INIT_EPSILON,
 ):
     """
     Train a single replica using full-batch alternating gradient descent.
@@ -330,10 +427,6 @@ def train_single_replica(
             global_data=global_data,
         )
 
-    num_observed = int(shared_data["num_observed"])
-    if num_observed == 0:
-        return 0.0, 0.0, 0
-
     i_idx = shared_data["i_idx"]
     j_idx = shared_data["j_idx"]
     Y_train = shared_data["Y_train"]
@@ -341,32 +434,57 @@ def train_single_replica(
     X_teacher = shared_data["X_teacher"]
     N1, M = W_teacher.shape
     N2 = X_teacher.shape[1]
+    num_observed = int(shared_data["num_observed"])
 
-    torch.manual_seed(seed + 2000)
-    W_hat = torch.randn(N1, M, device=device, dtype=torch.float32) * 0.01
-    X_hat = torch.randn(M, N2, device=device, dtype=torch.float32) * 0.01
+    W_hat, X_hat = initialize_student_factors(
+        W_teacher,
+        X_teacher,
+        seed=seed,
+        init_epsilon=init_epsilon,
+        random_scale=0.01,
+    )
 
-    final_loss = 0.0
+    if num_observed == 0:
+        order_parameters = compute_order_parameters(
+            W_hat, X_hat, W_teacher, X_teacher
+        )
+        order_parameters["convergence"] = float("nan")
+        if return_order_parameters:
+            return order_parameters, 0.0, 0
+        cosine_similarity = compute_y_cosine_similarity(
+            W_hat, X_hat, W_teacher, X_teacher
+        )
+        return cosine_similarity, 0.0, 0
+
+    Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
+    previous_loss = float(compute_loss_per_edge(Y_train, Y_pred, M).item())
+    final_loss = previous_loss
+    final_convergence = float("nan")
     steps_taken = max_steps
 
-    for step in range(max_steps):
+    for step in range(1, max_steps + 1):
         W_hat = agd_step_W(W_hat, X_hat, Y_train, i_idx, j_idx, lr)
         X_hat = agd_step_X(W_hat, X_hat, Y_train, i_idx, j_idx, lr)
         W_hat = normalize_to_unit_variance(W_hat)
         X_hat = normalize_to_unit_variance(X_hat)
 
-        if step % 100 == 0 or step == max_steps - 1:
-            Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
-            final_loss = compute_loss_per_edge(Y_train, Y_pred, M).item()
+        Y_pred = compute_predictions(W_hat, X_hat, i_idx, j_idx, M)
+        final_loss = float(compute_loss_per_edge(Y_train, Y_pred, M).item())
+        final_convergence = abs(final_loss - previous_loss)
+        previous_loss = final_loss
 
-            if final_loss < convergence_threshold:
-                steps_taken = step + 1
-                break
+        if final_convergence < convergence_threshold:
+            steps_taken = step
+            break
+
+    order_parameters = compute_order_parameters(W_hat, X_hat, W_teacher, X_teacher)
+    order_parameters["convergence"] = final_convergence
+    if return_order_parameters:
+        return order_parameters, final_loss, steps_taken
 
     cosine_similarity = compute_y_cosine_similarity(
         W_hat, X_hat, W_teacher, X_teacher
     )
-
     return cosine_similarity, final_loss, steps_taken
 
 
@@ -375,6 +493,8 @@ def train_single_replica(
 # ============================================================================
 
 if __name__ == "__main__":
+    INIT_EPSILON = validate_init_epsilon(INIT_EPSILON)
+
     print("=" * 60)
     print("Alternating Gradient Descent (AGD) - Matrix Factorization")
     print("GPU Accelerated with Multiple Replicas")
@@ -397,6 +517,17 @@ if __name__ == "__main__":
     print(f"Replicas per alpha: {NUM_REPLICAS}")
     print(f"Teacher / graph / noise seed: {SHARED_SEED}")
     print(f"Student seed rule: {STUDENT_SEED_BASE} + replica_id")
+    print(
+        "Student init:",
+        (
+            "0.01 * N(0, 1) random initialization"
+            if INIT_EPSILON is None
+            else (
+                "epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1), "
+                f"epsilon={INIT_EPSILON}"
+            )
+        ),
+    )
     print("Shared across run: teacher / noisy field")
     print("Shared per alpha: graph")
     print("Replica-specific: student initialization only")
@@ -405,7 +536,8 @@ if __name__ == "__main__":
     # Create results directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     results_dir_name = (
-        f"{timestamp}_agd_cosine_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}"
+        f"{timestamp}_agd_m_overlap_Y_{N1}x{M}_alpha{ALPHA_START}-{ALPHA_STOP}_"
+        f"initeps{INIT_EPSILON if INIT_EPSILON is not None else 'random'}"
     )
     results_dir = Path(__file__).parent / "results" / results_dir_name
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -413,7 +545,7 @@ if __name__ == "__main__":
     
     # Save configuration
     config = {
-        'algorithm': 'agd_cosine',
+        'algorithm': 'agd_m_overlap_y_alpha_sweep',
         'N1': N1,
         'N2': N2,
         'M': M,
@@ -428,14 +560,39 @@ if __name__ == "__main__":
         'graph_seed': SHARED_SEED,
         'noise_seed': SHARED_SEED,
         'student_seed_base': STUDENT_SEED_BASE,
+        'student_init_mode': (
+            'random_gaussian' if INIT_EPSILON is None else 'correlated_gaussian'
+        ),
+        'student_init_formula': (
+            '0.01 * N(0, 1)'
+            if INIT_EPSILON is None
+            else 'epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)'
+        ),
+        'student_init_epsilon': INIT_EPSILON,
         'num_replicas': NUM_REPLICAS,
         'convergence_threshold': CONVERGENCE_THRESHOLD,
         'device': str(device),
-        'evaluation_metric': 'cosine_similarity_in_Y_space',
+        'evaluation_metric': 'dense_teacher_student_overlap_order_parameter',
+        'order_parameters': list(ORDER_PARAMETER_KEYS),
+        'loss_definition': (
+            '(M / |E_obs|) * sum_{(i,j) in E_obs} '
+            '(Y_obs[i,j] - Y_hat[i,j])^2'
+        ),
+        'convergence_definition': 'abs(loss_per_edge_t - loss_per_edge_{t-1})',
+        'unavailable_order_parameters': {
+            'Q_W': 'GD does not maintain a posterior variance estimate v_W.',
+            'Q_X': 'GD does not maintain a posterior variance estimate v_X.',
+        },
         'shared_teacher_noise_global': True,
         'shared_graph_per_alpha': True,
         'replica_variation': 'student_initialization_only',
-        'early_stop_metric': 'loss_per_edge',
+        'early_stop_metric': 'convergence',
+        'early_stop_rule': 'stop when convergence < convergence_threshold',
+        'output_files': [
+            'config.yaml',
+            'alpha_summary.csv',
+            'plots/m_overlap_Y_vs_alpha.png',
+        ],
     }
     config_path = results_dir / "config.yaml"
     with open(config_path, 'w') as f:
@@ -459,7 +616,8 @@ if __name__ == "__main__":
     )
 
     for alpha in alphas:
-        cosine_similarity_values = []
+        order_parameter_values = {key: [] for key in ORDER_PARAMETER_KEYS}
+        convergence_values = []
         loss_values = []
         steps_values = []
         shared_data = prepare_shared_alpha_data(
@@ -475,7 +633,7 @@ if __name__ == "__main__":
         for replica_id in range(NUM_REPLICAS):
             seed = STUDENT_SEED_BASE + replica_id
             t0 = time.time()
-            cosine_similarity, final_loss, steps_taken = train_single_replica(
+            order_parameters, final_loss, steps_taken = train_single_replica(
                 alpha=alpha,
                 device=device,
                 seed=seed,
@@ -487,27 +645,44 @@ if __name__ == "__main__":
                 noise_var=NOISE_VAR,
                 convergence_threshold=CONVERGENCE_THRESHOLD,
                 shared_data=shared_data,
+                return_order_parameters=True,
+                init_epsilon=INIT_EPSILON,
             )
             dt = time.time() - t0
-            cosine_similarity_values.append(cosine_similarity)
+            for key in ORDER_PARAMETER_KEYS:
+                order_parameter_values[key].append(order_parameters[key])
+            convergence_values.append(order_parameters["convergence"])
             loss_values.append(final_loss)
             steps_values.append(steps_taken)
             completed += 1
+            convergence_text = (
+                "nan"
+                if math.isnan(order_parameters["convergence"])
+                else f"{order_parameters['convergence']:.2e}"
+            )
             print(
                 f"α={alpha:.2f}, replica {replica_id+1}/{NUM_REPLICAS}: "
-                f"CosSim={cosine_similarity:.4f}, Loss/edge={final_loss:.2e}, "
-                f"Steps={steps_taken} ({dt:.1f}s) [{completed}/{total_tasks}]"
+                f"m_overlap_Y={order_parameters['m_overlap_Y']:.4f}, Loss/edge={final_loss:.2e}, "
+                f"convergence={convergence_text}, Steps={steps_taken} "
+                f"({dt:.1f}s) [{completed}/{total_tasks}]"
             )
         
-        results[alpha] = {
-            'cosine_similarity_mean': np.mean(cosine_similarity_values),
-            'cosine_similarity_std': np.std(cosine_similarity_values),
-            'cosine_similarity_values': cosine_similarity_values,
+        alpha_result = {
             'loss_mean': np.mean(loss_values),
             'loss_std': np.std(loss_values),
             'loss_values': loss_values,
+            'convergence_mean': nan_mean(convergence_values),
+            'convergence_std': nan_std(convergence_values),
+            'convergence_values': convergence_values,
             'steps_mean': np.mean(steps_values),
+            'steps_values': steps_values,
         }
+        for key in ORDER_PARAMETER_KEYS:
+            values = order_parameter_values[key]
+            alpha_result[f'{key}_mean'] = np.mean(values)
+            alpha_result[f'{key}_std'] = np.std(values)
+            alpha_result[f'{key}_values'] = values
+        results[alpha] = alpha_result
     
     total_time = time.time() - start_time
     
@@ -515,13 +690,13 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Results (mean ± std)")
     print("=" * 60)
-    print(f"{'Alpha':>6} | {'CosSim':^20} | {'Loss/edge':^20} | {'Steps':>8}")
+    print(f"{'Alpha':>6} | {'m_overlap_Y':^20} | {'Loss/edge':^20} | {'Steps':>8}")
     print("-" * 60)
     for alpha in sorted(results.keys()):
         r = results[alpha]
         print(
             f"{alpha:6.2f} | "
-            f"{r['cosine_similarity_mean']:8.4f} ± {r['cosine_similarity_std']:<8.4f} | "
+            f"{r['m_overlap_Y_mean']:8.4f} ± {r['m_overlap_Y_std']:<8.4f} | "
             f"{r['loss_mean']:8.2e} ± {r['loss_std']:<8.2e} | "
             f"{r['steps_mean']:8.0f}"
         )
@@ -529,24 +704,20 @@ if __name__ == "__main__":
     print(f"\nTotal time: {total_time:.1f}s")
     print("=" * 60)
     
-    # Plot cosine similarity vs alpha with error bars
+    # Plot m_overlap_Y vs alpha with error bars
     print("\nGenerating plots...")
     
     alphas_list = sorted(results.keys())
-    cosine_similarity_means = [
-        results[a]['cosine_similarity_mean'] for a in alphas_list
-    ]
-    cosine_similarity_stds = [
-        results[a]['cosine_similarity_std'] for a in alphas_list
-    ]
+    m_overlap_y_means = [results[a]['m_overlap_Y_mean'] for a in alphas_list]
+    m_overlap_y_stds = [results[a]['m_overlap_Y_std'] for a in alphas_list]
     
     fig, ax = plt.subplots(figsize=(10, 7))
     
-    ax.errorbar(alphas_list, cosine_similarity_means, yerr=cosine_similarity_stds, 
+    ax.errorbar(alphas_list, m_overlap_y_means, yerr=m_overlap_y_stds,
                 fmt='o-', color='#1E88E5', markersize=6, linewidth=2,
                 capsize=4, capthick=1.5, elinewidth=1.5)
     ax.set_xlabel(r'$\alpha$ (observation density)', fontsize=14)
-    ax.set_ylabel("Cosine Similarity", fontsize=14)
+    ax.set_ylabel("m_overlap_Y", fontsize=14)
     ax.set_title(f'Phase Transition (AGD)\n({N1}×{N2}, M={M}, {MAX_STEPS} steps, {NUM_REPLICAS} replicas)', fontsize=16)
     ax.set_xlim(ALPHA_START - 0.1, ALPHA_STOP + 0.1)
     ax.set_ylim(-0.05, 1.05)
@@ -561,35 +732,50 @@ if __name__ == "__main__":
     plots_dir.mkdir(exist_ok=True)
     
     # Save results to CSV
-    csv_path = results_dir / "metrics.csv"
+    csv_path = results_dir / "alpha_summary.csv"
     with open(csv_path, 'w') as f:
         # Header
-        header = (
-            "alpha,cosine_similarity_mean,cosine_similarity_std,"
-            "loss_per_edge_mean,loss_per_edge_std,Steps_mean"
+        header = "alpha"
+        for key in ORDER_PARAMETER_KEYS:
+            header += f",{key}_mean,{key}_std"
+        header += (
+            ",loss_per_edge_mean,loss_per_edge_std,"
+            "convergence_mean,convergence_std,steps_mean"
         )
         for i in range(NUM_REPLICAS):
-            header += f",cosine_similarity_replica_{i},loss_per_edge_replica_{i}"
+            for key in ORDER_PARAMETER_KEYS:
+                header += f",{key}_replica_{i + 1}"
+            header += (
+                f",loss_per_edge_replica_{i + 1},"
+                f"convergence_replica_{i + 1},steps_replica_{i + 1}"
+            )
         f.write(header + "\n")
         
         # Data
         for alpha in alphas_list:
             r = results[alpha]
-            line = (
-                f"{alpha},{r['cosine_similarity_mean']},"
-                f"{r['cosine_similarity_std']},{r['loss_mean']},"
-                f"{r['loss_std']},{r['steps_mean']}"
+            line = f"{alpha}"
+            for key in ORDER_PARAMETER_KEYS:
+                line += f",{r[f'{key}_mean']},{r[f'{key}_std']}"
+            line += (
+                f",{r['loss_mean']},{r['loss_std']},"
+                f"{r['convergence_mean']},{r['convergence_std']},"
+                f"{r['steps_mean']}"
             )
-            for cosine_similarity_value, loss_v in zip(
-                r['cosine_similarity_values'], r['loss_values']
-                ):
-                line += f",{cosine_similarity_value},{loss_v}"
+            for replica_idx in range(NUM_REPLICAS):
+                for key in ORDER_PARAMETER_KEYS:
+                    line += f",{r[f'{key}_values'][replica_idx]}"
+                line += (
+                    f",{r['loss_values'][replica_idx]},"
+                    f"{r['convergence_values'][replica_idx]},"
+                    f"{r['steps_values'][replica_idx]}"
+                )
             f.write(line + "\n")
     
     print(f"Metrics saved: {csv_path}")
 
     # Save plot
-    plot_path = plots_dir / "cosine_similarity_vs_alpha.png"
+    plot_path = plots_dir / "m_overlap_Y_vs_alpha.png"
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     print(f"Plot saved: {plot_path}")
     plt.close(fig)

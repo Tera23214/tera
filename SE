@@ -1,0 +1,127 @@
+#!/usr/bin/env wolframscript
+
+ClearAll[
+  optionValue,
+  normalizeNumberString,
+  parseNumber,
+  parseInteger,
+  parseLambdaValues,
+  buildLambdaValues,
+  runOneLambda
+];
+
+scriptPath = If[StringLength[$InputFileName] > 0, $InputFileName, First[$ScriptCommandLine]];
+scriptDir = DirectoryName[scriptPath];
+args = Rest[$ScriptCommandLine];
+
+optionValue[argList_List, name_String, default_] := Module[{pos},
+  pos = FirstPosition[argList, name, None];
+  If[pos === None || pos[[1]] >= Length[argList],
+    default,
+    argList[[pos[[1]] + 1]]
+  ]
+];
+
+normalizeNumberString[value_String] := StringReplace[
+  value,
+  RegularExpression["([0-9.]+)[eE]([+-]?[0-9]+)"] -> "$1*^$2"
+];
+
+parseNumber[value_] := N[ToExpression[normalizeNumberString[ToString[value]]]];
+
+parseInteger[value_] := Round[parseNumber[value]];
+
+parseLambdaValues[text_String] := parseNumber /@ Select[
+  StringSplit[text, {",", " ", "\t", "\n"}],
+  StringLength[#] > 0 &
+];
+
+buildLambdaValues[argList_List] := Module[
+  {explicit, start, stop, step},
+  explicit = optionValue[argList, "--lambdas", ""];
+  If[StringLength[explicit] > 0,
+    Return[parseLambdaValues[explicit]]
+  ];
+
+  start = parseNumber[optionValue[argList, "--lambda-start", "0.5"]];
+  stop = parseNumber[optionValue[argList, "--lambda-stop", "5.0"]];
+  step = parseNumber[optionValue[argList, "--lambda-step", "0.1"]];
+
+  If[step <= 0, Print["--lambda-step must be positive."]; Exit[2]];
+  N[Range[start, stop + step/2, step]]
+];
+
+If[MemberQ[args, "--help"],
+  Print["Usage:"];
+  Print["  wolframscript -file tera/SE --lambdas 1,1.5,2,2.5,3"];
+  Print["  wolframscript -file tera/SE --lambda-start 0.5 --lambda-stop 5 --lambda-step 0.1"];
+  Print["Options:"];
+  Print["  --N1 INT --N2 INT --alpha-w FLOAT --a FLOAT"];
+  Print["  --tol FLOAT --max-iter INT --eps FLOAT --output PATH"];
+  Exit[0]
+];
+
+config = <|
+  "N1" -> parseInteger[optionValue[args, "--N1", "2500"]],
+  "N2" -> parseInteger[optionValue[args, "--N2", "2500"]],
+  "alphaW" -> parseNumber[optionValue[args, "--alpha-w", "1.6"]],
+  "a" -> parseNumber[optionValue[args, "--a", "0.01"]],
+  "tol" -> parseNumber[optionValue[args, "--tol", "1e-12"]],
+  "maxIter" -> parseInteger[optionValue[args, "--max-iter", "10000"]],
+  "eps" -> parseNumber[optionValue[args, "--eps", "1.0"]],
+  "output" -> optionValue[args, "--output", FileNameJoin[{scriptDir, "SE_results.dat"}]]
+|>;
+
+lambdaValues = buildLambdaValues[args];
+
+runOneLambda[lambda_, cfg_Association] := Module[
+  {
+    n1 = cfg["N1"],
+    n2 = cfg["N2"],
+    alphaW = cfg["alphaW"],
+    alphaX,
+    eps = cfg["eps"],
+    tol = cfg["tol"],
+    maxIter = cfg["maxIter"],
+    mw = cfg["a"],
+    mx = cfg["a"],
+    t = 0,
+    diff = Infinity,
+    v,
+    chi,
+    mwProposal,
+    mxProposal,
+    mwNext,
+    mxNext,
+    history
+  },
+  alphaX = (n1/n2) alphaW;
+  history = {<|"lambda" -> lambda, "t" -> t, "m_w" -> mw, "m_x" -> mx|>};
+  While[t < maxIter && diff > tol,
+    v = lambda^2 (1 - mw mx);
+    chi = 1/(1 + v);
+
+    mwProposal = alphaW lambda^2 mw chi/(1 + alphaW lambda^2 mw chi);
+    mxProposal = alphaX lambda^2 mx chi/(1 + alphaX lambda^2 mx chi);
+
+    mwNext = mw + eps (mwProposal - mw);
+    mxNext = mx + eps (mxProposal - mx);
+    diff = Max[Abs[mwNext - mw], Abs[mxNext - mx]];
+
+    mw = mwNext;
+    mx = mxNext;
+    t++;
+    AppendTo[history, <|"lambda" -> lambda, "t" -> t, "m_w" -> mw, "m_x" -> mx|>];
+  ];
+
+  history
+];
+
+results = Flatten[runOneLambda[#, config] & /@ lambdaValues];
+header = {"lambda", "t", "m_w", "m_x"};
+table = Prepend[(Lookup[#, header] &) /@ results, header];
+
+Export[config["output"], table, "Table"];
+
+Print["Saved: " <> config["output"]];
+Print[ExportString[table, "Table"]];

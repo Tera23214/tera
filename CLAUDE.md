@@ -28,57 +28,97 @@
 
 ## プロジェクト構成
 
-### デュアルトラックシステム
+### 主要ディレクトリ
 
-| ディレクトリ | Git | 用途 |
-| `smf/` | dev ブランチ | モジュール化フレームワーク、ローカル開発 |
-| `smf_docs/` | dev ブランチ | SMF モジュールドキュメント |
-| `terao_gd/` | - | 勾配降下法実験 |
-| `_legacy/` | - | アーカイブ済み旧コード |
+| ディレクトリ | 用途 |
+|-------------|------|
+| `terao_gamp_gaussian/` | Gaussian prior / Gaussian noise のG-AMP実験群 |
+| `terao_gd/` | 勾配降下法・ミニバッチGDによる比較実験 |
+| `AMP_single_variable/` | 単一変数・小規模検証用AMP実験 |
+| `graph_core/` | グラフ生成・グラフ関連の共通コード |
+| `../p-body_tensor_completion/` | p-body tensor completion のC++ AMP/BP実装とSEノートブック |
 
-### Wang/ ディレクトリ
+### terao_gamp_gaussian/
+
+Gaussian prior / Gaussian noise のPython実装群。現在の主な研究対象。
+
 ```
-Wang/
-├── bigamp/              # BiG-AMP アルゴリズム（推奨）
-│   ├── train.py         # 標準トレーニング
-│   ├── compare_sizes.py # サイズ比較実験
-│   ├── orthogonal_teacher.py
-│   ├── low_loop_graph.py
-│   └── replica_overlap.py
-├── agd/                 # 交互勾配降下法
-│   ├── train_parallel.py
-│   └── train_sequential.py
-├── analysis/            # 分析ツール
-└── results/             # 実験結果
+terao_gamp_gaussian/
+├── graph.py                    # 二部グラフ生成
+├── utils.py                    # f_input, g_out, 初期化, 正規化
+├── Dence_Alternating/          # Dense系の交互更新G-AMP
+│   ├── random_graph_version/   # F=1, random graph 版
+│   ├── random_F_version/       # random F を保持して計算する版
+│   └── non_uniform_n1_graph_version/
+├── Edge_Alternating/           # Edge観測上の交互更新G-AMP
+│   ├── random_graph_version/   # F=1, edge graph 版
+│   ├── random_F_version/       # random F をテンソルとして保持する版
+│   ├── random_F_sequentially/  # random F を逐次生成・集約する省メモリ版
+│   └── F_1_sequentially/       # F=1 の逐次集約版
+├── Dence_cosine/               # Dense系のcosine評価実験
+├── Dence_scaler_var_cosine/    # Dense系のscalar variance近似・cosine評価
+├── F_1_onsager*/               # F=1 Onsager 実装の旧系列
+└── Result_data/, results/      # 実験結果
 ```
 
-### terao_gd/ ディレクトリ
+#### random_F_sequentially の要点
+
+`Edge_Alternating/random_F_sequentially/` は、巨大な `E x M` の `F_edge` を保持せず、chunkごとにRademacher `F=±1` を再生成して逐次集約する版。
+
+```
+random_F_sequentially/
+├── core.py                      # 逐次F生成、W/X half-step、order parameter計算
+├── order_parameters_vs_step.py  # 固定条件でstepごとのorder parameterを保存
+├── run_noise_sweep.py  # noise_varを横軸にしたcosine/loss sweep
+├── Result_data/        # 手動整理済み・比較用データ
+└── results/            # 実行ごとの自動出力
+```
+
+注意：
+- `step = W更新 + X更新`。
+- `step 0` は初期状態、`step 1` はWとXを1回ずつ更新した後。
+- `order_parameters_vs_step.py` の履歴は step ごとの order parameter で、初期状態も含める。
+- 固定条件の step 履歴では loss/cosine ではなく、dense 全体 matrix 上の `q_Y`, `m_overlap_Y`, `convergence` を主に見る。
+
+### terao_gd/
+
+G-AMPとの比較用のGD/AGD実験群。
+
 ```
 terao_gd/
-├── gd.py                # 基本AGD（Q_Y vs α プロット）
-├── gd_noisy.py          # ノイズ付き観測
-├── gd_order_params.py   # オーダーパラメータ解析
-└── gd_varying_M.py      # ランクM変化実験
+├── gd_cosine/                    # F=1 cosine評価
+├── gd_cosine_F_random/           # random F のGD cosine評価
+├── gd_cosine_minibatch/          # ミニバッチGD
+├── gd_cosine_minibatch_F_random/ # random F + ミニバッチGD
+├── gd_warm/                      # warm start / continuation実験
+├── gd_simulation/                # シミュレーション補助
+└── results/, gd_result/          # 実験結果
 ```
 
-### smf/ フレームワーク
+### p-body_tensor_completion/
+
+`tera/` の外側にある比較対象のC++実装群。Python G-AMPとの差分調査で頻繁に参照する。
+
 ```
-smf/
-├── cli.py              # コマンドラインエントリ
-├── core/               # コア機能
-│   ├── config.py       # 設定システム
-│   ├── device.py       # GPU/CPU 検出
-│   ├── experiment.py   # 実験ランナー
-│   ├── checkpoint.py   # チェックポイント
-│   ├── llm_advisor.py  # 自然言語設定
-│   └── progress.py     # 進捗表示
-└── modules/            # プラグイン可能モジュール
-    ├── algorithms/     # bigamp, agd
-    ├── graphs/         # random, dinic, low_loop
-    ├── teachers/       # standard, orthogonal
-    ├── metrics/        # Q_Y, overlap
-    └── outputs/        # plotting, storage
+p-body_tensor_completion/
+├── Message_Passing/
+│   ├── AMP_GaussGauss.cpp       # Gaussian prior, Gaussian noise AMP
+│   ├── AMP_GaussSign.cpp        # Gaussian prior, Sign output AMP
+│   ├── AMP_IsingGaussian.cpp    # Ising prior, Gaussian noise AMP
+│   ├── BP_*.cpp                 # BP実装群
+│   └── AMP_GaussSign/data/      # C++実行結果
+└── SE/
+    ├── SE.nb                    # Mathematica State Evolution notebook
+    └── SE_*.dat                 # SE出力データ
 ```
+
+C++ AMP とPython G-AMPを比較するときは、グラフ以外にも以下を必ず確認する：
+- 同時更新か交互更新か
+- `step` の定義
+- 初期化式と `v` の初期値
+- Onsager memory の時刻管理
+- 評価指標が factor overlap か signal-space cosine か
+- `lambda` と `noise_var` の渡し方
 
 ---
 
@@ -149,7 +189,61 @@ Teacher-Student マスク行列分解：部分観測 `Y_obs = mask(W₀ × X₀)
 |------|------|------|
 | `Q_Y` | [0, 1] | 再構成品質（回転不変） |
 | `Q_Y_unobserved` | [0, 1] | 未観測位置の一致度（汎化） |
-| `Q_W`, `Q_X` | [-1, 1] | 因子コサイン類似度 |
+| `q_Y` | [-1, 1] | 正規化後のY空間 teacher-student overlap |
+
+### AMP/G-AMPで観測するパラメータ
+
+AMP/G-AMP の状態を比較するときは、生徒の推定値そのものと、teacher-student overlap を混同しない。
+このドキュメントでは以下の名前を使う。
+
+- `W_hat`, `X_hat`: 生徒の推定値。コード上の `m_W`, `m_X` に対応する。
+- `m_overlap_*`: 正規化前の平均 overlap。
+- `Q_*`: 推定値の二乗平均。
+- `QQ_*`: 二次モーメント推定値 `v_*` の平均。
+- `q_Y`: 正規化後のY空間 overlap。正規化後の order parameter は基本的に `q_Y` のみを見る。
+  `q_Y` は観測edge上ではなく、未観測位置も含む dense な全体 matrix 上で計算し、汎化性能を見る。
+
+| 指標 | 定義 | 意味 |
+|------|------|------|
+| `m_overlap_Y` | `(1 / (N1 * N2 * M)) * sum_{i,j,mu} W_teacher[i,mu] * X_teacher[j,mu] * W_hat[i,mu] * X_hat[j,mu]` | dense 全体 matrix 上での正規化前 teacher-student overlap |
+| `m_overlap_W` | `(1 / (N1 * M)) * sum_{i,mu} W_teacher[i,mu] * W_hat[i,mu]` | `W` 因子の正規化前 teacher-student overlap |
+| `m_overlap_X` | `(1 / (N2 * M)) * sum_{j,mu} X_teacher[j,mu] * X_hat[j,mu]` | `X` 因子の正規化前 teacher-student overlap |
+| `Q_Y_teacher` | `(1 / (N1 * N2 * M)) * sum_{i,j,mu} (W_teacher[i,mu] * X_teacher[j,mu])^2` | 教師Y成分の二乗平均 |
+| `Q_Y_student` | `(1 / (N1 * N2 * M)) * sum_{i,j,mu} (W_hat[i,mu] * X_hat[j,mu])^2` | 生徒Y成分の二乗平均 |
+| `q_Y` | `m_overlap_Y / sqrt(Q_Y_teacher * Q_Y_student)` | dense 全体 matrix 上での正規化後 teacher-student overlap |
+| `Q_W` | `(1 / (N1 * M)) * sum_{i,mu} W_hat[i,mu]^2` | 推定値 `W_hat` の二乗平均 |
+| `Q_X` | `(1 / (N2 * M)) * sum_{j,mu} X_hat[j,mu]^2` | 推定値 `X_hat` の二乗平均 |
+| `QQ_W` | `(1 / (N1 * M)) * sum_{i,mu} v_W[i,mu]` | 二次モーメント推定値 `v_W` の平均 |
+| `QQ_X` | `(1 / (N2 * M)) * sum_{j,mu} v_X[j,mu]` | 二次モーメント推定値 `v_X` の平均 |
+| `convergence` | `(sum abs(W_proposal - W_hat_old) + sum abs(X_proposal - X_hat_old)) / ((N1 + N2) * M)` | 生徒の推定値そのものの step 間変化量の平均 |
+
+`m_overlap_W`, `m_overlap_X`, `m_overlap_Y` は正規化前の量であり、`q_Y` とは別に保存する。
+`m_overlap_Y`, `Q_Y_teacher`, `Q_Y_student`, `q_Y` は、観測された edge だけではなく、`N1 * N2` 全ペアを使って計算する。
+Bayes optimal 設定では教師の二乗平均は1に近いが、推定値 `W_hat`, `X_hat` の二乗平均 `Q_W`, `Q_X` は推定状態を表すため、1に固定して扱わない。
+`convergence` は overlap や `q_Y` の変化ではなく、生徒の推定値 `W_hat`, `X_hat` の変化から計算する。
+C++ AMP と合わせるため、ダンピング後の実変化量ではなく、ダンピング前の proposal と更新前推定値の差を使う。
+`step 0` は前の状態が存在しないため、`convergence` は未定義として `NaN` にする。`step 1` の `convergence` が `step 1 - step 0` に対応する。
+
+### GD/AGDでのconvergence
+
+GD/AGD は AMP/G-AMP と異なり、明示的な最適化目的関数 `loss` を下げるアルゴリズムである。
+そのため、GD/AGD の `convergence` は生徒推定値 `W_hat`, `X_hat` の要素ごとの差分ではなく、loss の step 間差分で見る。
+
+| 指標 | 定義 | 意味 |
+|------|------|------|
+| `convergence` | `abs(loss_t - loss_{t-1})` | 最適化目的関数の step 間変化量 |
+
+GD/AGD で sparse 観測上の loss を使う場合、`convergence` に使う `loss_t` は以下の正規化済み loss とする。
+
+```text
+loss_t = (M / |E_obs|) * sum_{(i,j) in E_obs} (Y_obs[i,j] - Y_hat_t[i,j])^2
+```
+
+ここで `|E_obs|` は観測 edge 数であり、`Y_hat_t[i,j] = (1 / sqrt(M)) * sum_mu W_hat_t[i,mu] * X_hat_t[mu,j]` とする。
+この定義は、実装上の総和 loss `M * sum residual^2` を観測 edge 数で割った `loss_per_edge` に対応する。
+ミニバッチGDであっても、convergence 判定や履歴保存に使う `loss_t` は現在のミニバッチ上の loss ではなく、固定された観測 edge 全体 `E_obs` 上で評価する。
+`step 0` は前の loss が存在しないため、`convergence` は `NaN` にする。`step 1` の `convergence` が `abs(loss_1 - loss_0)` に対応する。
+AMP/G-AMP と GD/AGD を比較するときは、`convergence` の定義が異なるため、収束速度の比較では同じ閾値を機械的に共有しない。
 
 ---
 

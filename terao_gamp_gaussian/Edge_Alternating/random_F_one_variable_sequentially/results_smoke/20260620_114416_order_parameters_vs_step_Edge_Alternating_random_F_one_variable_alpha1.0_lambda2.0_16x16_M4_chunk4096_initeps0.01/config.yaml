@@ -1,0 +1,77 @@
+algorithm: gamp_one_variable_random_F_symmetric_W_order_parameters_vs_step
+graph_model: random_graph_row_degree_reused_from_biregular_generator
+f_mode: random
+f_distribution: rademacher_pm1
+effective_F_values: +/- lambda / sqrt(M)
+sequential_aggregation: true
+one_variable: true
+student_matrix: W
+observation_model: Y_ij = lambda/sqrt(M) * sum_mu F_ijmu W_i,mu W_j,mu + noise
+self_edges: excluded
+symmetric_endpoint_update: true
+algorithm_note: C++ p=2 comparison-oriented one-variable update
+stores_F_edge: false
+edge_chunk_size: 4096
+parallelism: sequential_replicas_round_robin_over_requested_devices
+alpha: 1.0
+lambda: 2.0
+N: 16
+N1_cli: 16
+N2_cli: 16
+M: 4
+max_steps: 2
+damping: 0
+damping_schedule: constant
+beta_scale: 0.01
+beta_max: 0.4
+noise_var: 1.0
+teacher_seed: 1
+graph_seed: 1
+noise_seed: 1
+f_seed: 1001
+student_seed_base: 100
+student_init_mode: correlated_gaussian
+student_init_formula: epsilon * teacher + sqrt(epsilon - epsilon^2) * N(0, 1)
+student_init_epsilon: 0.01
+legacy_cli_seed: 1
+num_replicas: 2
+convergence_threshold: 1.0e-06
+order_parameter_eval_interval: 1
+includes_initial_state: true
+initial_state_step: 0
+initial_convergence: nan_no_previous_state
+early_stop: false
+devices:
+- cpu
+torch_threads: 1
+deterministic_requested: false
+order_parameters:
+- m_overlap_W
+- Q_W
+- convergence
+final_pair_order_parameters:
+- q_W
+q_definition: final-step average over all replica pairs a<b; q_W=mean(m_W^a*m_W^b)
+minimum_replicas_for_q: 2
+convergence_definition: sum_abs_pre_damping_student_proposal_minus_old divided by
+  (N*M)
+convergence_plot_yscale: log10
+update_scheme: one_variable_symmetric_endpoint_update
+step_definition: all edges accumulate both endpoint contributions, then W is updated
+  synchronously
+shared_teacher_noise_global: true
+shared_graph_per_alpha: true
+shared_random_F_per_alpha: true
+raw_edges_before_self_edge_filter: 64
+observed_edges_after_self_edge_filter: 58
+removed_self_edges: 6
+output_files:
+- config.yaml
+- order_parameters_history.csv
+- replica_summary.csv
+- final_pair_q_summary.csv
+- final_pair_q_pairs.csv
+- progress.yaml
+- plots/m_overlap_W_vs_step.png
+- plots/Q_W_vs_step.png
+- plots/convergence_vs_step.png
